@@ -74,9 +74,12 @@ PylonROS2CameraNode::PylonROS2CameraNode(const rclcpp::NodeOptions& options)
     return;
 
   // starting spinning thread
-  RCLCPP_INFO_STREAM(LOGGER, "Start image grabbing if node connects to topic with a spinning rate of: " << this->frameRate() << " Hz");
+  // Tick slightly faster than the camera: the blocking grab paces the loop to
+  // the true frame rate, so timer jitter cannot cost a whole frame per tick.
+  const double spin_rate = this->frameRate() * 1.1;
+  RCLCPP_INFO_STREAM(LOGGER, "Start image grabbing if node connects to topic with a spinning rate of: " << spin_rate << " Hz");
   timer_ = this->create_wall_timer(
-            std::chrono::duration<double>(1. / this->frameRate()),
+            std::chrono::duration<double>(1. / spin_rate),
             std::bind(&PylonROS2CameraNode::spin, this));
 }
 
@@ -629,7 +632,14 @@ bool PylonROS2CameraNode::initAndRegister()
     return false;
   }
 
-  if (!this->pylon_camera_->registerCameraConfiguration())
+  // CSoftwareTriggerConfiguration re-enables the FrameStart software trigger on
+  // every StartGrabbing(), overriding whatever profile the camera holds. With
+  // "CurrentSetting" keep pylon's default free-run configuration instead.
+  if (this->pylon_camera_parameter_set_.startup_user_set_ == "CurrentSetting")
+  {
+    RCLCPP_INFO(LOGGER, "startup_user_set is 'CurrentSetting': not forcing the software trigger, camera runs free if its trigger is off");
+  }
+  else if (!this->pylon_camera_->registerCameraConfiguration())
   {
     RCLCPP_ERROR_STREAM(LOGGER, "Error while registering the camera configuration to software-trigger mode!");
     this->cm_status_.status_id = pylon_ros2_camera_interfaces::msg::ComponentStatus::ERROR;

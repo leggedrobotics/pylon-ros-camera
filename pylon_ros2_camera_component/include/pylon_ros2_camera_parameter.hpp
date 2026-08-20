@@ -268,6 +268,15 @@ public:
     std::string startup_user_set_;
 
     /**
+     * Basler Compression Beyond: "Off", "BaslerCompressionBeyond" (lossless),
+     * plus the max transferred size as a percentage of the raw image.
+     * Re-applied after encoding setup because changing PixelFormat resets it.
+     */
+    std::string image_compression_mode_;
+    std::string image_compression_rate_option_;
+    double image_compression_ratio_;
+
+    /**
      * The inter-package delay in ticks. Only used for GigE cameras.
      * To prevent lost frames it should be greater 0.
      * For most of GigE cameras, a value of 1000 is reasonable.
