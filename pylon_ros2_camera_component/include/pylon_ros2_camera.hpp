@@ -289,7 +289,13 @@ public:
      * @return the roi setting.
      */
     virtual sensor_msgs::msg::RegionOfInterest currentROI() = 0;
-    
+
+    /**
+     * Returns true when the camera is using a hardware ROI rather than the
+     * full sensor. A false result maps to an all-zero camera_info.roi.
+     */
+    virtual bool isROIActive() = 0;
+
     /**
      * Returns the current horizontal binning_x setting.
      * @return the horizontal binning_x setting.

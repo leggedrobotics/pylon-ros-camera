@@ -8,6 +8,10 @@ Changelog for package pylon_ros2_camera
 * Fix Ctrl-C hangs with external triggering by stopping acquisition from the
   shutdown callback, immediately unblocking a pending ``RetrieveResult()``
   call (backport of Jazzy issue #275 fix ``18baa69``).
+* Make ``camera_info.roi`` follow the ROS convention: publish an all-zero ROI
+  for full-sensor acquisition and populate it only while hardware cropping is
+  active (backport of the Jazzy PR #292 implementation in ``5d635752``; the
+  follow-up commit ``a408351`` carries the same subject but not the ROI diff).
 
 3.0.7 (2026-06-25)
 -------------------
