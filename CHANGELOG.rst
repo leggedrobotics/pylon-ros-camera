@@ -5,6 +5,9 @@ Changelog for package pylon_ros2_camera
 3.0.8 (2026-07-23)
 -------------------
 * Fix auto-brightness startup parameters ignored when both ``exposure`` and ``gain`` are also set (issue #265).
+* Fix Ctrl-C hangs with external triggering by stopping acquisition from the
+  shutdown callback, immediately unblocking a pending ``RetrieveResult()``
+  call (backport of Jazzy issue #275 fix ``18baa69``).
 
 3.0.7 (2026-06-25)
 -------------------

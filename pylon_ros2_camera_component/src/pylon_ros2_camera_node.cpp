@@ -82,6 +82,17 @@ PylonROS2CameraNode::PylonROS2CameraNode(const rclcpp::NodeOptions& options)
   timer_ = this->create_wall_timer(
             std::chrono::duration<double>(1. / spin_rate),
             std::bind(&PylonROS2CameraNode::spin, this));
+
+  this->get_node_base_interface()->get_context()->add_on_shutdown_callback([this]()
+  {
+    // Unblock RetrieveResult() if it is waiting for an external trigger pulse.
+    // This must bypass grab_mutex_: the grab callback holds that mutex while
+    // blocked inside RetrieveResult().
+    if (this->pylon_camera_ != nullptr)
+    {
+      this->pylon_camera_->grabbingStopping();
+    }
+  });
 }
 
 PylonROS2CameraNode::~PylonROS2CameraNode()
