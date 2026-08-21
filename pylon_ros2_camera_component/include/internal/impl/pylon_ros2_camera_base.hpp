@@ -28,7 +28,9 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -413,6 +415,24 @@ bool PylonROS2CameraImpl<CameraTraitT>::startGrabbing(const PylonROS2CameraParam
         }
 
         grab_strategy_ = parameters.grab_strategy_;
+        if (parameters.frame_retention_ > 0 &&
+            GenApi::IsWritable(cam_->GetStreamGrabberParams().FrameRetention))
+        {
+            cam_->GetStreamGrabberParams().FrameRetention.SetValue(parameters.frame_retention_);
+            RCLCPP_INFO_STREAM(LOGGER_BASE, "GigE frame retention set to "
+                << parameters.frame_retention_ << " ms");
+        }
+        if (parameters.socket_buffer_size_ > 0 &&
+            GenApi::IsWritable(cam_->GetStreamGrabberParams().SocketBufferSize))
+        {
+            auto& socket_buffer = cam_->GetStreamGrabberParams().SocketBufferSize;
+            const int64_t requested = parameters.socket_buffer_size_;
+            const int64_t bounded = std::max(
+                socket_buffer.GetMin(), std::min(socket_buffer.GetMax(), requested));
+            socket_buffer.SetValue(bounded);
+            RCLCPP_INFO_STREAM(LOGGER_BASE, "GigE socket receive buffer set to "
+                << bounded << " bytes");
+        }
         //cam_->StartGrabbing();
         grabbingStarting();
         user_output_selector_enums_ = detectAndCountNumUserOutputs();
@@ -4617,6 +4637,29 @@ std::string PylonROS2CameraImpl<CameraTraitT>::setPTPPriority(const int& value)
     catch (const GenICam::GenericException &e)
     {
         RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while setting PTP priority:" << e.GetDescription());
+        return e.GetDescription();
+    }
+}
+
+template <typename CameraTraitT>
+std::string PylonROS2CameraImpl<CameraTraitT>::setPTPServoLockedThreshold(const int& value)
+{
+    try
+    {
+        if (GenApi::IsWritable(cam_->BslPtpServoLockedThreshold))
+        {
+            cam_->BslPtpServoLockedThreshold.SetValue(value);
+            return "done";
+        }
+        RCLCPP_ERROR_STREAM(LOGGER_BASE,
+            "The connected camera does not support a writable PTP servo locked threshold.");
+        return "The connected camera does not support this feature";
+    }
+    catch (const GenICam::GenericException &e)
+    {
+        RCLCPP_ERROR_STREAM(LOGGER_BASE,
+            "An exception while setting the PTP servo locked threshold:"
+            << e.GetDescription());
         return e.GetDescription();
     }
 }

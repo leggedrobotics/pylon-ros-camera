@@ -321,6 +321,8 @@ public:
 
     virtual std::string setPTPPriority(const int& value) override;
 
+    virtual std::string setPTPServoLockedThreshold(const int& value) override;
+
     virtual std::string setPTPProfile(const int& value) override;
 
     virtual std::string setPTPNetworkMode(const int& value) override;

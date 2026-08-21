@@ -113,6 +113,15 @@
     #  should be good (1500 for single-board computer)
     # gige/mtu_size: 3000
 
+    #  Maximum time in milliseconds to complete a GigE frame, including packet
+    #  resends. Increase this when short receive-side scheduling stalls cause
+    #  incomplete buffers. Only used for GigE cameras.
+    # gige/frame_retention: 100
+
+    #  Pylon GigE receive socket size in bytes. The system rmem_max must permit
+    #  this value. Zero leaves the Pylon transport default unchanged.
+    # gige/socket_buffer_size: 0
+
     #  Only used for GigE cameras.
     #  The inter-package delay in ticks to prevent lost frames.
     #  For most of GigE cameras, a value of 1000 is reasonable.

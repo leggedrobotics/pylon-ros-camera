@@ -295,6 +295,17 @@ public:
     int frame_transmission_delay_;
 
     /**
+     * Maximum time in milliseconds for the GigE stream grabber to complete a
+     * frame, including packet resends. Only used for GigE cameras.
+     */
+    int frame_retention_;
+
+    /**
+     * Kernel receive socket size in bytes for the Pylon GigE stream grabber.
+     */
+    int socket_buffer_size_;
+
+    /**
       Shutter mode
     */
     SHUTTER_MODE shutter_mode_;
