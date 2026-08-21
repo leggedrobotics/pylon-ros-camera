@@ -12,6 +12,10 @@ Changelog for package pylon_ros2_camera
   for full-sensor acquisition and populate it only while hardware cropping is
   active (backport of the Jazzy PR #292 implementation in ``5d635752``; the
   follow-up commit ``a408351`` carries the same subject but not the ROI diff).
+* Cache whether the selected pixel format needs 12-bit shifting, completing
+  the applicable part of Jazzy ``923f05e`` without repeating GenICam encoding
+  reads and string comparisons for every frame. Chunk and trigger modes were
+  already cached by the Humble 50 Hz transport backport.
 
 3.0.7 (2026-06-25)
 -------------------

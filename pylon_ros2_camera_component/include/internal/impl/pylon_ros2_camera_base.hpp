@@ -543,9 +543,7 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image, rclcpp:
     // Bit shifting
     // ------------------------------------------------------------------------
     // In case of 12 bits we need to shift the image bits 4 positions to the left
-    const std::string ros_enc = this->currentROSEncoding();
-    const std::string gen_api_encoding(cam_->PixelFormat.ToString().c_str());
-    if (encodingconversions::is_12_bit_ros_enc(ros_enc) && (gen_api_encoding == "BayerRG12" || gen_api_encoding == "BayerBG12" || gen_api_encoding == "BayerGB12" || gen_api_encoding == "BayerGR12" || gen_api_encoding == "Mono12"))
+    if (bit_shift_active_cache_)
     {
         const uint8_t *pImageBuffer = rawImageData(ptr_grab_result, decompress_scratch_);
         if (pImageBuffer == nullptr)
@@ -644,9 +642,7 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(uint8_t* image)
     // Bit shifting
     // ------------------------------------------------------------------------
     // In case of 12 bits we need to shift the image bits 4 positions to the left
-    std::string ros_enc = currentROSEncoding();
-
-    if (encodingconversions::is_12_bit_ros_enc(ros_enc))
+    if (bit_shift_active_cache_)
     {
         const uint8_t *pImageBuffer = rawImageData(ptr_grab_result, decompress_scratch_);
         if (pImageBuffer == nullptr)
@@ -979,6 +975,10 @@ std::string PylonROS2CameraImpl<CameraTraitT>::setImageEncoding(const std::strin
             grabbingStarting();
             cam_->StopGrabbing();
             GenApi::CEnumerationPtr(node_map.GetNode("PixelFormat"))->FromString(gen_api_encoding.c_str());
+            bit_shift_active_cache_ = encodingconversions::is_12_bit_ros_enc(ros_encoding) &&
+                (gen_api_encoding == "BayerRG12" || gen_api_encoding == "BayerBG12" ||
+                 gen_api_encoding == "BayerGB12" || gen_api_encoding == "BayerGR12" ||
+                 gen_api_encoding == "Mono12");
             return "done";
         }
         else

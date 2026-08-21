@@ -465,6 +465,7 @@ protected:
     // Created on first compressed frame (Basler Compression Beyond).
     std::unique_ptr<Pylon::CImageDecompressor> image_decompressor_;
     std::vector<uint8_t> decompress_scratch_;
+    mutable bool bit_shift_active_cache_ = false;
     mutable int chunk_mode_active_cache_ = -99;
     mutable int trigger_mode_cache_ = -99;
 
