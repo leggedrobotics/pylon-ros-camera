@@ -460,6 +460,13 @@ protected:
     typedef typename CameraTraitT::TimerSelectorEnums TimerSelectorEnums;
     typedef typename CameraTraitT::TimerTriggerSourceEnums TimerTriggerSourceEnums;
 
+    enum class TimestampMode
+    {
+        Auto,
+        Host,
+        Camera
+    };
+
     CBaslerInstantCameraT* cam_;
 
     // Created on first compressed frame (Basler Compression Beyond).
@@ -468,6 +475,8 @@ protected:
     mutable bool bit_shift_active_cache_ = false;
     mutable int chunk_mode_active_cache_ = -99;
     mutable int trigger_mode_cache_ = -99;
+    TimestampMode timestamp_mode_ = TimestampMode::Auto;
+    bool camera_timestamp_uses_bsl_ = false;
 
     // Each camera has it's own getter for GenApi accessors that are named
     // differently for USB and GigE
@@ -485,6 +494,8 @@ protected:
                                        const float& current_brightness) override;
 
     virtual bool grab(Pylon::CBaslerUniversalGrabResultPtr& grab_result);
+
+    bool configureTimestamping(const PylonROS2CameraParameter& parameters);
 
     virtual bool setupSequencer(const std::vector<float>& exposure_times,
                                 std::vector<float>& exposure_times_set);

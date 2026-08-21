@@ -35,6 +35,22 @@
     #  Calling the GrabImages-Action can result in a higher framerate
     frame_rate: 5.0
 
+    #  Image header timestamp policy:
+    #  "auto" preserves legacy behavior, "host" always uses ROS time sampled
+    #  after a grab, and "camera" requires a hardware timestamp on every frame.
+    timestamp_source: "auto"
+
+    #  On ace 2 cameras, select FrameStart, ExposureStart, or ExposureEnd for
+    #  BslChunkTimestampValue. ExposureStart is usually the useful sensor time.
+    camera_timestamp_selector: "ExposureStart"
+
+    #  Reject required camera timestamps whose epoch differs grossly from ROS.
+    camera_timestamp_max_age_ms: 1000.0
+
+    #  Set false when a synchronization manager must prove PTP lock and then
+    #  release acquisition through the start_grabbing service.
+    start_grabbing_immediately: true
+
     #  Mode of camera's shutter.
     #  The supported modes are "rolling", "global" and "global_reset"
     #  Default value is "" (empty) means default_shutter_mode

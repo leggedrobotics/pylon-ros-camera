@@ -159,6 +159,18 @@ USB cameras must be disconnected and then reconnected after setting a new device
 - **frame_rate**  
   The desired publisher frame rate if listening to the topics. This parameter can only be set once at start-up. Calling the GrabImages-Action can result in a higher frame rate.
 
+- **timestamp_source (not for the blaze)**
+  Selects the `Image.header.stamp` source. `auto` preserves legacy behavior by using an enabled timestamp chunk when available and otherwise falling back to post-grab ROS time. `host` always uses post-grab ROS time. `camera` configures and requires a hardware timestamp chunk; frames without a valid camera timestamp are not published.
+
+- **camera_timestamp_selector (not for the blaze)**
+  Selects the ace 2 hardware event represented by `BslChunkTimestampValue`: `FrameStart`, `ExposureStart`, or `ExposureEnd`. The default is `ExposureStart`. Cameras exposing only the legacy `ChunkTimestamp` support `FrameStart`.
+
+- **camera_timestamp_max_age_ms (not for the blaze)**
+  Maximum absolute difference between a required camera timestamp and the ROS clock. Frames outside this bound are rejected, detecting an incompatible clock epoch or an unlocked camera clock.
+
+- **start_grabbing_immediately**
+  When false, camera initialization completes with acquisition paused. A synchronization manager can then configure and verify PTP before releasing acquisition through the `start_grabbing` service.
+
 - **shutter_mode (not for the blaze)**  
   Set mode of camera's shutter if the value is not empty. The supported modes are 'rolling', 'global' and 'global_reset'. Default value is '' (empty)
 

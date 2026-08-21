@@ -20,6 +20,11 @@ Changelog for package pylon_ros2_camera
   thread instead of a ROS executor timer. This keeps services and diagnostics
   responsive while ``RetrieveResult()`` waits for a frame or trigger, while
   retaining immediate shutdown cancellation and bounded thread joining.
+* Add strict hardware image timestamps for PTP deployments. The driver can
+  configure the Basler timestamp chunk before acquisition, use the ace 2
+  ``BslChunkTimestampValue`` event selector, reject silent host-time fallback,
+  validate the camera/ROS clock domain, and defer grabbing until an external
+  synchronization manager has proven lock.
 
 3.0.7 (2026-06-25)
 -------------------

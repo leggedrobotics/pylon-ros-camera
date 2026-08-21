@@ -263,6 +263,31 @@ public:
     bool enable_current_params_publisher_;
 
     /**
+     * Image header timestamp policy:
+     * - "auto": preserve legacy behavior (use a configured camera chunk when available)
+     * - "host": always stamp after the completed grab with the ROS clock
+     * - "camera": require and configure a per-frame hardware timestamp chunk
+     */
+    std::string timestamp_source_;
+
+    /**
+     * Hardware event represented by an ace 2 BslChunkTimestampValue.
+     */
+    std::string camera_timestamp_selector_;
+
+    /**
+     * Maximum absolute difference between a camera timestamp and the ROS clock.
+     * This detects a mismatched epoch or an unlocked camera clock.
+     */
+    double camera_timestamp_max_age_ms_;
+
+    /**
+     * Start streaming during node initialization. Disable this when an external
+     * synchronization manager must prove PTP lock before allowing publication.
+     */
+    bool start_grabbing_immediately_;
+
+    /**
      * The startup user set.
      */
     std::string startup_user_set_;

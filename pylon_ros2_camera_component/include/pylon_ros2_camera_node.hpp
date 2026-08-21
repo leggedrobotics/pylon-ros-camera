@@ -1834,6 +1834,8 @@ protected:
   // Blocking camera acquisition must not occupy the ROS executor thread.
   std::thread acquisition_thread_;
   std::atomic<bool> stop_acquisition_{false};
+  std::atomic<bool> grabbing_enabled_{true};
+  std::atomic<bool> camera_timestamp_validated_{false};
   // mutex
   std::recursive_mutex grab_mutex_;
 

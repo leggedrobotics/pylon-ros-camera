@@ -355,6 +355,102 @@ bool PylonROS2CameraImpl<CameraTraitT>::setupSequencer(const std::vector<float>&
 }
 
 template <typename CameraTraitT>
+bool PylonROS2CameraImpl<CameraTraitT>::configureTimestamping(
+    const PylonROS2CameraParameter& parameters)
+{
+    camera_timestamp_uses_bsl_ = false;
+
+    if (parameters.timestamp_source_ == "host")
+    {
+        timestamp_mode_ = TimestampMode::Host;
+        RCLCPP_INFO(LOGGER_BASE, "Image headers will use the post-grab ROS clock");
+        return true;
+    }
+
+    if (parameters.timestamp_source_ == "auto")
+    {
+        timestamp_mode_ = TimestampMode::Auto;
+        chunk_mode_active_cache_ = -99;
+        RCLCPP_INFO(LOGGER_BASE,
+            "Image timestamp source is auto: use a readable camera chunk, otherwise post-grab ROS time");
+        return true;
+    }
+
+    timestamp_mode_ = TimestampMode::Camera;
+
+    try
+    {
+        if (!GenApi::IsWritable(cam_->ChunkModeActive) ||
+            !GenApi::IsWritable(cam_->ChunkSelector) ||
+            !GenApi::IsWritable(cam_->ChunkEnable))
+        {
+            RCLCPP_ERROR(LOGGER_BASE,
+                "Camera timestamps were required, but timestamp chunks cannot be configured");
+            return false;
+        }
+
+        // Basler requires chunk mode, the Timestamp selector, and ChunkEnable.
+        // Configure these while acquisition is stopped; no control-channel
+        // reads or selector writes are then needed in the per-frame hot path.
+        cam_->ChunkModeActive.SetValue(true);
+        cam_->ChunkSelector.SetValue(
+            Basler_UniversalCameraParams::ChunkSelectorEnums::ChunkSelector_Timestamp);
+
+        if (GenApi::IsAvailable(cam_->BslChunkTimestampSelector))
+        {
+            if (!GenApi::IsWritable(cam_->BslChunkTimestampSelector))
+            {
+                RCLCPP_ERROR(LOGGER_BASE,
+                    "BslChunkTimestampSelector is available but not writable while configuring timestamps");
+                return false;
+            }
+
+            if (parameters.camera_timestamp_selector_ == "FrameStart")
+            {
+                cam_->BslChunkTimestampSelector.SetValue(
+                    Basler_UniversalCameraParams::BslChunkTimestampSelectorEnums::
+                    BslChunkTimestampSelector_FrameStart);
+            }
+            else if (parameters.camera_timestamp_selector_ == "ExposureEnd")
+            {
+                cam_->BslChunkTimestampSelector.SetValue(
+                    Basler_UniversalCameraParams::BslChunkTimestampSelectorEnums::
+                    BslChunkTimestampSelector_ExposureEnd);
+            }
+            else
+            {
+                cam_->BslChunkTimestampSelector.SetValue(
+                    Basler_UniversalCameraParams::BslChunkTimestampSelectorEnums::
+                    BslChunkTimestampSelector_ExposureStart);
+            }
+            camera_timestamp_uses_bsl_ = true;
+        }
+        else if (parameters.camera_timestamp_selector_ != "FrameStart")
+        {
+            RCLCPP_ERROR_STREAM(LOGGER_BASE,
+                "The camera only exposes legacy ChunkTimestamp (FrameStart), but "
+                << parameters.camera_timestamp_selector_ << " was required");
+            return false;
+        }
+
+        cam_->ChunkEnable.SetValue(true);
+        chunk_mode_active_cache_ = 1;
+
+        RCLCPP_INFO_STREAM(LOGGER_BASE,
+            "Camera hardware timestamps enabled: "
+            << (camera_timestamp_uses_bsl_ ? "BslChunkTimestampValue/" : "ChunkTimestamp/")
+            << parameters.camera_timestamp_selector_);
+        return true;
+    }
+    catch (const GenICam::GenericException& e)
+    {
+        RCLCPP_ERROR_STREAM(LOGGER_BASE,
+            "Failed to configure required camera timestamps: " << e.GetDescription());
+        return false;
+    }
+}
+
+template <typename CameraTraitT>
 bool PylonROS2CameraImpl<CameraTraitT>::startGrabbing(const PylonROS2CameraParameter& parameters)
 {
     try
@@ -421,6 +517,11 @@ bool PylonROS2CameraImpl<CameraTraitT>::startGrabbing(const PylonROS2CameraParam
             {
                 RCLCPP_ERROR_STREAM(LOGGER_BASE, "Failed to enable image compression: " << e.GetDescription());
             }
+        }
+
+        if (!configureTimestamping(parameters))
+        {
+            return false;
         }
 
         grab_strategy_ = parameters.grab_strategy_;
@@ -573,37 +674,43 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image, rclcpp:
         image.assign(pImageBuffer, pImageBuffer + img_size_byte_);
     }
 
-    // getChunkModeActive() is a ~2.5 ms GigE control read; cache it per grab session.
-    if (chunk_mode_active_cache_ == -99)
+    bool inspect_timestamp_chunk = timestamp_mode_ == TimestampMode::Camera;
+    if (timestamp_mode_ == TimestampMode::Auto)
     {
-        chunk_mode_active_cache_ = this->getChunkModeActive();
-    }
-    bool use_chunk_timestamp = false;
-    if (chunk_mode_active_cache_ == 1)
-    {
-        const std::string success = this->setChunkSelector(29); // = ChunkSelector_Timestamp
-        if (success.find("done") != std::string::npos && this->getChunkEnable() == 1)
+        // This is a GigE control read, so cache it until a chunk service changes
+        // ChunkModeActive. Reading fields from the grab result below is local.
+        if (chunk_mode_active_cache_ == -99)
         {
-            use_chunk_timestamp = true;
+            chunk_mode_active_cache_ = this->getChunkModeActive();
         }
+        inspect_timestamp_chunk = chunk_mode_active_cache_ == 1;
     }
 
-    if (use_chunk_timestamp)
+    if (inspect_timestamp_chunk)
     {
         try
         {
-            if (!ptr_grab_result->ChunkTimestamp.IsReadable())
+            // ace 2 exposes the event-selectable Bsl timestamp. In strict
+            // camera mode, never substitute legacy FrameStart for a requested
+            // ExposureStart/ExposureEnd value.
+            if ((camera_timestamp_uses_bsl_ || timestamp_mode_ == TimestampMode::Auto) &&
+                ptr_grab_result->BslChunkTimestampValue.IsReadable())
             {
-                RCLCPP_WARN_STREAM(LOGGER_BASE, "Error while trying to get the chunk timestamp. The connected camera may not support this feature");
+                stamp = rclcpp::Time(static_cast<uint64_t>(
+                    ptr_grab_result->BslChunkTimestampValue.GetValue()));
             }
-            else
+            else if (!camera_timestamp_uses_bsl_ &&
+                     ptr_grab_result->ChunkTimestamp.IsReadable())
             {
-                stamp = rclcpp::Time(static_cast<uint64_t>(ptr_grab_result->ChunkTimestamp.GetValue()));
+                stamp = rclcpp::Time(static_cast<uint64_t>(
+                    ptr_grab_result->ChunkTimestamp.GetValue()));
             }
         }
         catch (const GenICam::GenericException &e)
         {
-            RCLCPP_WARN_STREAM(LOGGER_BASE, "An exception while getting the chunk timestamp occurred: " << e.GetDescription());
+            RCLCPP_WARN_STREAM(LOGGER_BASE,
+                "An exception while reading the per-frame camera timestamp occurred: "
+                << e.GetDescription());
         }
     }
 
@@ -3571,9 +3678,16 @@ template <typename CameraTraitT>
 std::string PylonROS2CameraImpl<CameraTraitT>::setMaxNumBuffer(const int& size) {
     if (GenApi::IsAvailable(cam_->MaxNumBuffer)){
         try {
-            grabbingStopping();
+            const bool was_grabbing = cam_->IsGrabbing();
+            if (was_grabbing)
+            {
+                grabbingStopping();
+            }
             cam_->MaxNumBuffer.SetValue(size);
-            grabbingStarting();
+            if (was_grabbing)
+            {
+                grabbingStarting();
+            }
             return "done";
         } catch ( const GenICam::GenericException &e ){
                 RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while setting the Maximum number of buffers size occurred:" << e.GetDescription());
