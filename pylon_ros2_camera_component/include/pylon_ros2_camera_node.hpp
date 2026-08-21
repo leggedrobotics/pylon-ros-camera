@@ -85,12 +85,14 @@
 
 #include <diagnostic_updater/diagnostic_updater.hpp>
 
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 
@@ -194,6 +196,11 @@ protected:
    * @brief Spinning grabbing thread
    */
   virtual void spin();
+
+  /**
+   * @brief Execute one acquisition and publication iteration
+   */
+  virtual bool spinOnce();
 
   /**
    * @brief Grabs an image and stores the image in img_raw_msg_
@@ -1824,8 +1831,9 @@ protected:
   // blaze related action
   rclcpp_action::Server<GrabBlazeDataAction>::SharedPtr grab_blaze_data_as_;
 
-  // spinning thread
-  rclcpp::TimerBase::SharedPtr timer_;
+  // Blocking camera acquisition must not occupy the ROS executor thread.
+  std::thread acquisition_thread_;
+  std::atomic<bool> stop_acquisition_{false};
   // mutex
   std::recursive_mutex grab_mutex_;
 

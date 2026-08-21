@@ -28,8 +28,10 @@
 
 #include <GenApi/GenApi.h>
 
+#include <pthread.h>
 #include <rclcpp/logger.hpp>
 #include <rmw/qos_profiles.h>
+#include <signal.h>
 
 //#include <functional>
 
@@ -74,17 +76,13 @@ PylonROS2CameraNode::PylonROS2CameraNode(const rclcpp::NodeOptions& options)
   if (!this->init())
     return;
 
-  // starting spinning thread
-  // Tick slightly faster than the camera: the blocking grab paces the loop to
-  // the true frame rate, so timer jitter cannot cost a whole frame per tick.
-  const double spin_rate = this->frameRate() * 1.1;
-  RCLCPP_INFO_STREAM(LOGGER, "Start image grabbing if node connects to topic with a spinning rate of: " << spin_rate << " Hz");
-  timer_ = this->create_wall_timer(
-            std::chrono::duration<double>(1. / spin_rate),
-            std::bind(&PylonROS2CameraNode::spin, this));
+  RCLCPP_INFO_STREAM(LOGGER, "Start dedicated image acquisition thread at up to "
+      << this->frameRate() << " Hz");
+  this->acquisition_thread_ = std::thread(&PylonROS2CameraNode::spin, this);
 
   this->get_node_base_interface()->get_context()->add_on_shutdown_callback([this]()
   {
+    this->stop_acquisition_ = true;
     // Unblock RetrieveResult() if it is waiting for an external trigger pulse.
     // This must bypass grab_mutex_: the grab callback holds that mutex while
     // blocked inside RetrieveResult().
@@ -97,6 +95,17 @@ PylonROS2CameraNode::PylonROS2CameraNode(const rclcpp::NodeOptions& options)
 
 PylonROS2CameraNode::~PylonROS2CameraNode()
 {
+  this->stop_acquisition_ = true;
+  if (this->pylon_camera_ != nullptr)
+  {
+    // Also covers component unloading without a preceding rclcpp shutdown.
+    this->pylon_camera_->grabbingStopping();
+  }
+  if (this->acquisition_thread_.joinable())
+  {
+    this->acquisition_thread_.join();
+  }
+
   if (this->img_rect_pub_)
   {
     delete this->img_rect_pub_;
@@ -923,6 +932,51 @@ bool PylonROS2CameraNode::startGrabbing()
 
 void PylonROS2CameraNode::spin()
 {
+  // Keep SIGINT/SIGTERM on rclcpp's main thread so camera work cannot race the
+  // signal handler while it tears down the ROS context.
+  sigset_t signal_set;
+  sigemptyset(&signal_set);
+  sigaddset(&signal_set, SIGINT);
+  sigaddset(&signal_set, SIGTERM);
+  pthread_sigmask(SIG_BLOCK, &signal_set, nullptr);
+
+  const auto frame_period = std::chrono::duration<double>(1.0 / this->frameRate());
+  while (!this->stop_acquisition_ && rclcpp::ok())
+  {
+    const auto cycle_start = std::chrono::steady_clock::now();
+    bool acquired_frame = false;
+    try
+    {
+      acquired_frame = this->spinOnce();
+    }
+    catch (const std::exception& exception)
+    {
+      if (rclcpp::ok() && !this->stop_acquisition_)
+      {
+        RCLCPP_ERROR_STREAM(LOGGER, "Acquisition loop exception: " << exception.what());
+      }
+      else
+      {
+        break;
+      }
+    }
+
+    // RetrieveResult() paces an active stream. This deadline primarily avoids
+    // a busy loop when there are no subscribers and caps free-run publication.
+    const auto deadline = cycle_start +
+        std::chrono::duration_cast<std::chrono::steady_clock::duration>(frame_period);
+    if (!acquired_frame && !this->stop_acquisition_ &&
+        std::chrono::steady_clock::now() < deadline)
+    {
+      std::this_thread::sleep_until(deadline);
+    }
+  }
+}
+
+bool PylonROS2CameraNode::spinOnce()
+{
+  bool acquired_frame = false;
+
   if (this->camera_info_manager_->isCalibrated())
   {
     RCLCPP_INFO_ONCE(LOGGER, "Camera is calibrated");
@@ -958,7 +1012,7 @@ void PylonROS2CameraNode::spin()
 
     this->init();
     
-    return;
+    return false;
   }
 
   if (!this->pylon_camera_->isBlaze())
@@ -970,8 +1024,9 @@ void PylonROS2CameraNode::spin()
       {
         if (!this->grabImage())
         {
-          return;
+          return false;
         }
+        acquired_frame = true;
       }
 
       if (this->img_raw_pub_.getNumSubscribers() > 0)
@@ -1028,8 +1083,9 @@ void PylonROS2CameraNode::spin()
 
       if (!this->grabImage())
       {
-        return;
+        return false;
       }
+      acquired_frame = true;
 
       RCLCPP_INFO_STREAM_ONCE(LOGGER, "Camera frame from parameter server: " << this->pylon_camera_parameter_set_.cameraFrame());
       
@@ -1066,6 +1122,8 @@ void PylonROS2CameraNode::spin()
   {
     this->publishCurrentParams();
   }
+
+  return acquired_frame;
 }
 
 bool PylonROS2CameraNode::grabImage()

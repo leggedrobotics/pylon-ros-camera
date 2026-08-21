@@ -16,6 +16,10 @@ Changelog for package pylon_ros2_camera
   the applicable part of Jazzy ``923f05e`` without repeating GenICam encoding
   reads and string comparisons for every frame. Chunk and trigger modes were
   already cached by the Humble 50 Hz transport backport.
+* Run blocking acquisition and image publication on a dedicated, frame-paced
+  thread instead of a ROS executor timer. This keeps services and diagnostics
+  responsive while ``RetrieveResult()`` waits for a frame or trigger, while
+  retaining immediate shutdown cancellation and bounded thread joining.
 
 3.0.7 (2026-06-25)
 -------------------
