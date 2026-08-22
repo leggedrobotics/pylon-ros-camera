@@ -36,6 +36,7 @@
 #include <pylon/ImageDecompressor.h>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <GenApi/IEnumEntry.h>
 #include <string>
 #include <vector>
@@ -431,6 +432,7 @@ protected:
                               uint8_t* dest, size_t dest_size);
     const uint8_t* rawImageData(const Pylon::CBaslerUniversalGrabResultPtr& grab_result,
                                 std::vector<uint8_t>& scratch);
+    Pylon::CBaslerUniversalGrabResultPtr getCachedGrabResult() const;
 
     typedef typename CameraTraitT::CBaslerInstantCameraT CBaslerInstantCameraT;
     typedef typename CameraTraitT::ExposureAutoEnums ExposureAutoEnums;
@@ -475,6 +477,8 @@ protected:
     // Created on first compressed frame (Basler Compression Beyond).
     std::unique_ptr<Pylon::CImageDecompressor> image_decompressor_;
     std::vector<uint8_t> decompress_scratch_;
+    mutable std::mutex cached_grab_result_mutex_;
+    Pylon::CGrabResultPtr cached_grab_result_;
     mutable bool bit_shift_active_cache_ = false;
     mutable int chunk_mode_active_cache_ = -99;
     mutable int trigger_mode_cache_ = -99;
@@ -498,6 +502,12 @@ protected:
 
     virtual bool setExtendedBrightness(const int& target_brightness,
                                        const float& current_brightness) override;
+
+    // AutoTargetValue (older GigE cameras) uses an absolute 0-255 pixel
+    // intensity, while AutoTargetBrightness (USB and ace 2) uses 0.0-1.0.
+    // Detect the node at runtime because the generic GigE trait covers both
+    // conventions.
+    double convertBrightness(const int& value);
 
     virtual bool grab(Pylon::CBaslerUniversalGrabResultPtr& grab_result);
 

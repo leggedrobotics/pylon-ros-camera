@@ -59,7 +59,6 @@ struct GigECameraTrait
     // Therefore now both of them will use floats and convert at the end to integer when necessary
     typedef GenApi::IInteger GainType; 
 
-    typedef int64_t AutoTargetBrightnessValueType;
     typedef Basler_UniversalCameraParams::ShutterModeEnums ShutterModeEnums;
     typedef Basler_UniversalCameraParams::UserOutputSelectorEnums UserOutputSelectorEnums;
     typedef Basler_UniversalCameraParams::LineSelectorEnums LineSelectorEnums;
@@ -85,10 +84,6 @@ struct GigECameraTrait
     typedef Basler_UniversalCameraParams::TimerSelectorEnums TimerSelectorEnums;
     typedef Basler_UniversalCameraParams::TimerTriggerSourceEnums TimerTriggerSourceEnums;
 
-    static inline AutoTargetBrightnessValueType convertBrightness(const int& value)
-    {
-        return value;
-    }
 };
 
 typedef PylonROS2CameraImpl<GigECameraTrait> PylonROS2GigECamera;
@@ -1931,8 +1926,27 @@ std::string PylonROS2GigECamera::issueScheduledActionCommand(const int& device_k
 
         // Get the current timestamp of the first camera
         // NOTE: All cameras must be synchronized via Precision Time Protocol
-        cam_->GevTimestampControlLatch.Execute();
-        int64_t current_timestamp = cam_->GevTimestampValue.GetValue();
+        // SFNC 2.x cameras expose TimestampLatch/TimestampLatchValue; older
+        // GigE cameras expose GevTimestampControlLatch/GevTimestampValue.
+        int64_t current_timestamp = 0;
+        if (GenApi::IsAvailable(cam_->TimestampLatch) &&
+            GenApi::IsReadable(cam_->TimestampLatchValue))
+        {
+            cam_->TimestampLatch.Execute();
+            current_timestamp = cam_->TimestampLatchValue.GetValue();
+        }
+        else if (GenApi::IsAvailable(cam_->GevTimestampControlLatch) &&
+                 GenApi::IsReadable(cam_->GevTimestampValue))
+        {
+            cam_->GevTimestampControlLatch.Execute();
+            current_timestamp = cam_->GevTimestampValue.GetValue();
+        }
+        else
+        {
+            RCLCPP_ERROR_STREAM(LOGGER_GIGE,
+                "The connected camera provides no readable timestamp latch feature");
+            return "The connected camera provides no readable timestamp latch feature";
+        }
         // Specify that the command will be executed roughly 30 seconds
         // (30 000 000 000 ticks) after the current timestamp.
         int64_t action_time = current_timestamp + action_time_ns_from_current_timestamp;

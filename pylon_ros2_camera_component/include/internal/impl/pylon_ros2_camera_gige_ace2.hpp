@@ -202,10 +202,25 @@ bool PylonROS2GigEAce2Camera::applyCamSpecificStartupSettings(const PylonROS2Cam
                     << cam_->Gamma.GetMax() << "].");
             }
 
-            RCLCPP_INFO_STREAM(LOGGER_GIGE_ACE2, "Cam has pylon auto brightness range: ["
+            if (GenApi::IsAvailable(cam_->AutoTargetValue))
+            {
+                RCLCPP_INFO_STREAM(LOGGER_GIGE_ACE2, "Cam has pylon auto brightness range: ["
                     << cam_->AutoTargetValue.GetMin() << " - "
                     << cam_->AutoTargetValue.GetMax()
                     << "] which is the average pixel intensity.");
+            }
+            else if (GenApi::IsAvailable(cam_->AutoTargetBrightness))
+            {
+                RCLCPP_INFO_STREAM(LOGGER_GIGE_ACE2, "Cam has normalized pylon auto brightness range: ["
+                    << cam_->AutoTargetBrightness.GetMin() << " - "
+                    << cam_->AutoTargetBrightness.GetMax()
+                    << "] which is the average pixel intensity.");
+            }
+            else
+            {
+                RCLCPP_WARN(LOGGER_GIGE_ACE2,
+                    "Camera exposes no supported auto-brightness target node.");
+            }
 
             // raise inter-package delay (GevSCPD) for solving error:
             // 'the image buffer was incompletely grabbed'
@@ -1162,8 +1177,27 @@ std::string PylonROS2GigEAce2Camera::issueScheduledActionCommand(const int& devi
 
         // Get the current timestamp of the first camera
         // NOTE: All cameras must be synchronized via Precision Time Protocol
-        cam_->GevTimestampControlLatch.Execute();
-        int64_t current_timestamp = cam_->GevTimestampValue.GetValue();
+        // ace 2 uses the SFNC 2.x TimestampLatch/TimestampLatchValue names.
+        // Keep the legacy fallback for compatible older firmware variants.
+        int64_t current_timestamp = 0;
+        if (GenApi::IsAvailable(cam_->TimestampLatch) &&
+            GenApi::IsReadable(cam_->TimestampLatchValue))
+        {
+            cam_->TimestampLatch.Execute();
+            current_timestamp = cam_->TimestampLatchValue.GetValue();
+        }
+        else if (GenApi::IsAvailable(cam_->GevTimestampControlLatch) &&
+                 GenApi::IsReadable(cam_->GevTimestampValue))
+        {
+            cam_->GevTimestampControlLatch.Execute();
+            current_timestamp = cam_->GevTimestampValue.GetValue();
+        }
+        else
+        {
+            RCLCPP_ERROR_STREAM(LOGGER_GIGE_ACE2,
+                "The connected camera provides no readable timestamp latch feature");
+            return "The connected camera provides no readable timestamp latch feature";
+        }
         // Specify that the command will be executed roughly 30 seconds
         // (30 000 000 000 ticks) after the current timestamp.
         int64_t action_time = current_timestamp + action_time_ns_from_current_timestamp;
