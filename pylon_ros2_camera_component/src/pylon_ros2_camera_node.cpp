@@ -1160,7 +1160,10 @@ bool PylonROS2CameraNode::grabImage()
     // especially important for external trigger cameras where grab() blocks until the
     // trigger fires.
     rclcpp::Time stamp;
-    if (!this->pylon_camera_->grab(this->img_raw_msg_.data, stamp))
+    rclcpp::Duration timestamp_validation_offset =
+        rclcpp::Duration::from_nanoseconds(0);
+    if (!this->pylon_camera_->grab(
+        this->img_raw_msg_.data, stamp, &timestamp_validation_offset))
     {
       return false;
     }
@@ -1176,17 +1179,25 @@ bool PylonROS2CameraNode::grabImage()
     }
     else if (this->pylon_camera_parameter_set_.timestamp_source_ == "camera")
     {
-      const int64_t age_ns = rclcpp::Node::now().nanoseconds() - stamp.nanoseconds();
+      const int64_t header_age_ns =
+          rclcpp::Node::now().nanoseconds() - stamp.nanoseconds();
+      const int64_t age_ns = header_age_ns - timestamp_validation_offset.nanoseconds();
       const int64_t absolute_age_ns = age_ns >= 0 ? age_ns : -age_ns;
       const double age_ms = static_cast<double>(age_ns) / 1.0e6;
+      const double header_age_ms = static_cast<double>(header_age_ns) / 1.0e6;
+      const double timestamp_validation_offset_ms =
+          static_cast<double>(timestamp_validation_offset.nanoseconds()) / 1.0e6;
       const double absolute_age_ms = static_cast<double>(absolute_age_ns) / 1.0e6;
 
       if (absolute_age_ms >
           this->pylon_camera_parameter_set_.camera_timestamp_max_age_ms_)
       {
         RCLCPP_ERROR_THROTTLE(LOGGER, *this->get_clock(), 5000,
-            "Camera timestamp differs from the ROS clock by %.3f ms (limit %.3f ms); dropping frame",
+            "Camera timestamp validation reference differs from the ROS clock by %.3f ms "
+            "(header age %.3f ms, exposure offset %.3f ms, limit %.3f ms); dropping frame",
             age_ms,
+            header_age_ms,
+            timestamp_validation_offset_ms,
             this->pylon_camera_parameter_set_.camera_timestamp_max_age_ms_);
         return false;
       }
@@ -1194,8 +1205,8 @@ bool PylonROS2CameraNode::grabImage()
       if (!this->camera_timestamp_validated_)
       {
         RCLCPP_INFO_STREAM(LOGGER,
-            "Camera hardware timestamp validated against ROS time; first-frame age "
-            << age_ms << " ms");
+            "Camera hardware timestamp validated against ROS time; first-frame header age "
+            << header_age_ms << " ms, validation age " << age_ms << " ms");
         this->camera_timestamp_validated_ = true;
       }
     }

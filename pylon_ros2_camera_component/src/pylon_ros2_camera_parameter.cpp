@@ -684,11 +684,12 @@ void PylonROS2CameraParameter::validateParameterSet(rclcpp::Node& nh)
 
     if (this->camera_timestamp_selector_ != "FrameStart" &&
         this->camera_timestamp_selector_ != "ExposureStart" &&
+        this->camera_timestamp_selector_ != "ExposureMidpoint" &&
         this->camera_timestamp_selector_ != "ExposureEnd")
     {
         RCLCPP_WARN_STREAM(LOGGER, "Unknown camera_timestamp_selector '"
             << this->camera_timestamp_selector_
-            << "'; expected FrameStart, ExposureStart, or ExposureEnd. "
+            << "'; expected FrameStart, ExposureStart, ExposureMidpoint, or ExposureEnd. "
             << "Falling back to ExposureStart.");
         this->camera_timestamp_selector_ = "ExposureStart";
         nh.set_parameter(rclcpp::Parameter(

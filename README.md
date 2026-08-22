@@ -163,10 +163,10 @@ USB cameras must be disconnected and then reconnected after setting a new device
   Selects the `Image.header.stamp` source. `auto` preserves legacy behavior by using an enabled timestamp chunk when available and otherwise falling back to post-grab ROS time. `host` always uses post-grab ROS time. `camera` configures and requires a hardware timestamp chunk; frames without a valid camera timestamp are not published.
 
 - **camera_timestamp_selector (not for the blaze)**
-  Selects the ace 2 hardware event represented by `BslChunkTimestampValue`: `FrameStart`, `ExposureStart`, or `ExposureEnd`. The default is `ExposureStart`. Cameras exposing only the legacy `ChunkTimestamp` support `FrameStart`.
+  Selects the image timestamp: `FrameStart`, `ExposureStart`, `ExposureMidpoint`, or `ExposureEnd`. `ExposureMidpoint` adds half of the acquisition stream's exposure time to the ace 2 `ExposureStart` hardware timestamp, so it follows manual and automatic exposure changes without a per-frame control-channel read. A one-frame cache resolves queued transitions only when the new exposure would place the end of a completed frame in the future. The default is `ExposureStart`. Cameras exposing only the legacy `ChunkTimestamp` support `FrameStart`.
 
 - **camera_timestamp_max_age_ms (not for the blaze)**
-  Maximum absolute difference between a required camera timestamp and the ROS clock. Frames outside this bound are rejected, detecting an incompatible clock epoch or an unlocked camera clock.
+  Maximum absolute difference between the required camera clock reference and the ROS clock. For `ExposureMidpoint`, validation uses the reconstructed exposure end rather than the older semantic header timestamp, so long exposures remain valid. Frames outside this bound are rejected, detecting an incompatible clock epoch or an unlocked camera clock.
 
 - **start_grabbing_immediately**
   When false, camera initialization completes with acquisition paused. A synchronization manager can then configure and verify PTP before releasing acquisition through the `start_grabbing` service.

@@ -121,9 +121,15 @@ public:
      * Grab a camera frame and copy the result into image
      * @param image reference to the output image.
      * @param stamp if chunk timestamp is enabled, overwrite input stamp with the acquisition timestamp.
+     * @param timestamp_validation_offset if provided, receives the duration from
+     *        stamp to the end of exposure. This lets callers validate a semantic
+     *        exposure timestamp against the current clock without treating the
+     *        exposure duration as clock error.
      * @return true if the image was grabbed successfully.
      */
-    virtual bool grab(std::vector<uint8_t>& image, rclcpp::Time &stamp) = 0;
+    virtual bool grab(std::vector<uint8_t>& image,
+                      rclcpp::Time &stamp,
+                      rclcpp::Duration* timestamp_validation_offset = nullptr) = 0;
 
     /**
      * Grab a camera frame and copy the result into image

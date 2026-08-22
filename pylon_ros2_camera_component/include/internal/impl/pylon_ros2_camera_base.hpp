@@ -359,6 +359,8 @@ bool PylonROS2CameraImpl<CameraTraitT>::configureTimestamping(
     const PylonROS2CameraParameter& parameters)
 {
     camera_timestamp_uses_bsl_ = false;
+    camera_timestamp_midpoint_ = false;
+    previous_chunk_exposure_us_ = std::numeric_limits<double>::quiet_NaN();
 
     if (parameters.timestamp_source_ == "host")
     {
@@ -423,6 +425,7 @@ bool PylonROS2CameraImpl<CameraTraitT>::configureTimestamping(
                     Basler_UniversalCameraParams::BslChunkTimestampSelectorEnums::
                     BslChunkTimestampSelector_ExposureStart);
             }
+
             camera_timestamp_uses_bsl_ = true;
         }
         else if (parameters.camera_timestamp_selector_ != "FrameStart")
@@ -434,6 +437,41 @@ bool PylonROS2CameraImpl<CameraTraitT>::configureTimestamping(
         }
 
         cam_->ChunkEnable.SetValue(true);
+
+        if (parameters.camera_timestamp_selector_ == "ExposureMidpoint")
+        {
+            // The camera has no native midpoint event. Keep the timestamp chunk
+            // on ExposureStart and enable the exposure value carried in the
+            // acquisition stream. No per-frame GigE control read is required.
+            cam_->ChunkSelector.SetValue(
+                Basler_UniversalCameraParams::ChunkSelectorEnums::ChunkSelector_ExposureTime);
+
+            if (GenApi::IsAvailable(cam_->ChunkExposureTimeSelector) &&
+                GenApi::IsWritable(cam_->ChunkExposureTimeSelector))
+            {
+                cam_->ChunkExposureTimeSelector.SetValue(
+                    Basler_UniversalCameraParams::ChunkExposureTimeSelectorEnums::
+                    ChunkExposureTimeSelector_Common);
+            }
+
+            if (!GenApi::IsWritable(cam_->ChunkEnable))
+            {
+                RCLCPP_ERROR(LOGGER_BASE,
+                    "ExposureMidpoint requires a writable ExposureTime chunk");
+                return false;
+            }
+            cam_->ChunkEnable.SetValue(true);
+
+            // Leave the timestamp chunk selected after enabling ExposureTime.
+            cam_->ChunkSelector.SetValue(
+                Basler_UniversalCameraParams::ChunkSelectorEnums::ChunkSelector_Timestamp);
+            cam_->BslChunkTimestampSelector.SetValue(
+                Basler_UniversalCameraParams::BslChunkTimestampSelectorEnums::
+                BslChunkTimestampSelector_ExposureStart);
+            cam_->ChunkEnable.SetValue(true);
+            camera_timestamp_midpoint_ = true;
+        }
+
         chunk_mode_active_cache_ = 1;
 
         RCLCPP_INFO_STREAM(LOGGER_BASE,
@@ -615,12 +653,19 @@ const uint8_t* PylonROS2CameraImpl<CameraTrait>::rawImageData(const Pylon::CBasl
 }
 
 template <typename CameraTrait>
-bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image, rclcpp::Time &stamp)
+bool PylonROS2CameraImpl<CameraTrait>::grab(
+    std::vector<uint8_t>& image,
+    rclcpp::Time &stamp,
+    rclcpp::Duration* timestamp_validation_offset)
 {
     // Reset stamp to zero. It will only be set to a non-zero value if a hardware
     // acquisition timestamp is available via chunk data. The caller can test
     // stamp.nanoseconds() == 0 to know whether a hardware timestamp was provided.
     stamp = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    if (timestamp_validation_offset != nullptr)
+    {
+        *timestamp_validation_offset = rclcpp::Duration::from_nanoseconds(0);
+    }
 
     Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result;
     if (!this->grab(ptr_grab_result))
@@ -696,8 +741,61 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image, rclcpp:
             if ((camera_timestamp_uses_bsl_ || timestamp_mode_ == TimestampMode::Auto) &&
                 ptr_grab_result->BslChunkTimestampValue.IsReadable())
             {
-                stamp = rclcpp::Time(static_cast<uint64_t>(
-                    ptr_grab_result->BslChunkTimestampValue.GetValue()));
+                uint64_t timestamp_ns = static_cast<uint64_t>(
+                    ptr_grab_result->BslChunkTimestampValue.GetValue());
+
+                if (camera_timestamp_midpoint_)
+                {
+                    if (!ptr_grab_result->ChunkExposureTime.IsReadable())
+                    {
+                        RCLCPP_ERROR_THROTTLE(LOGGER_BASE, *rclcpp::Clock::make_shared(), 5000,
+                            "ExposureMidpoint requires ChunkExposureTime on every frame");
+                        return false;
+                    }
+
+                    const double chunk_exposure_us =
+                        ptr_grab_result->ChunkExposureTime.GetValue();
+                    if (!std::isfinite(chunk_exposure_us) || chunk_exposure_us <= 0.0)
+                    {
+                        RCLCPP_ERROR_STREAM(LOGGER_BASE,
+                            "Invalid per-frame ChunkExposureTime: "
+                            << chunk_exposure_us << " us");
+                        return false;
+                    }
+
+                    // A queued transition frame can carry the newly selected
+                    // manual/auto exposure even though the previous setting
+                    // produced its pixels. Prefer the current chunk normally,
+                    // but fall back one value when it would put exposure end in
+                    // the future for an image that has already arrived.
+                    double exposure_us = chunk_exposure_us;
+                    constexpr int64_t future_tolerance_ns = 5000000;
+                    const int64_t now_ns =
+                        timestamp_validation_clock_.now().nanoseconds();
+                    const int64_t current_exposure_end_ns =
+                        static_cast<int64_t>(timestamp_ns) +
+                        static_cast<int64_t>(std::llround(chunk_exposure_us * 1000.0));
+                    if (current_exposure_end_ns > now_ns + future_tolerance_ns &&
+                        std::isfinite(previous_chunk_exposure_us_) &&
+                        previous_chunk_exposure_us_ > 0.0)
+                    {
+                        exposure_us = previous_chunk_exposure_us_;
+                    }
+                    previous_chunk_exposure_us_ = chunk_exposure_us;
+
+                    // Basler reports exposure in microseconds and timestamps in
+                    // nanoseconds. Round to the nearest nanosecond.
+                    const int64_t half_exposure_ns = static_cast<int64_t>(
+                        std::llround(exposure_us * 500.0));
+                    timestamp_ns += static_cast<uint64_t>(half_exposure_ns);
+                    if (timestamp_validation_offset != nullptr)
+                    {
+                        *timestamp_validation_offset =
+                            rclcpp::Duration::from_nanoseconds(half_exposure_ns);
+                    }
+                }
+
+                stamp = rclcpp::Time(timestamp_ns);
             }
             else if (!camera_timestamp_uses_bsl_ &&
                      ptr_grab_result->ChunkTimestamp.IsReadable())

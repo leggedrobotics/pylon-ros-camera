@@ -34,6 +34,7 @@
 #include <pylon/BaslerUniversalGrabResultPtr.h>
 #include <pylon/PylonIncludes.h>
 #include <pylon/ImageDecompressor.h>
+#include <limits>
 #include <memory>
 #include <GenApi/IEnumEntry.h>
 #include <string>
@@ -71,7 +72,9 @@ public:
 
     virtual bool startGrabbing(const PylonROS2CameraParameter& parameters) override;
 
-    virtual bool grab(std::vector<uint8_t>& image, rclcpp::Time &stamp) override;
+    virtual bool grab(std::vector<uint8_t>& image,
+                      rclcpp::Time &stamp,
+                      rclcpp::Duration* timestamp_validation_offset = nullptr) override;
 
     virtual bool grab(uint8_t* image) override;
 
@@ -477,6 +480,9 @@ protected:
     mutable int trigger_mode_cache_ = -99;
     TimestampMode timestamp_mode_ = TimestampMode::Auto;
     bool camera_timestamp_uses_bsl_ = false;
+    bool camera_timestamp_midpoint_ = false;
+    double previous_chunk_exposure_us_ = std::numeric_limits<double>::quiet_NaN();
+    rclcpp::Clock timestamp_validation_clock_{RCL_SYSTEM_TIME};
 
     // Each camera has it's own getter for GenApi accessors that are named
     // differently for USB and GigE

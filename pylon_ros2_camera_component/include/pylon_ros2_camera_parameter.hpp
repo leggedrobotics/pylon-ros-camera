@@ -271,13 +271,15 @@ public:
     std::string timestamp_source_;
 
     /**
-     * Hardware event represented by an ace 2 BslChunkTimestampValue.
+     * Image timestamp selector. ExposureMidpoint combines the ace 2 hardware
+     * ExposureStart event with the exposure carried in the acquisition stream.
      */
     std::string camera_timestamp_selector_;
 
     /**
-     * Maximum absolute difference between a camera timestamp and the ROS clock.
-     * This detects a mismatched epoch or an unlocked camera clock.
+     * Maximum absolute difference between the camera clock validation reference
+     * and the ROS clock. For ExposureMidpoint the reference is exposure end, so
+     * long, valid exposures are not mistaken for clock error.
      */
     double camera_timestamp_max_age_ms_;
 

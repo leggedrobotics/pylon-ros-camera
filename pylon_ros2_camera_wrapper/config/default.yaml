@@ -40,11 +40,13 @@
     #  after a grab, and "camera" requires a hardware timestamp on every frame.
     timestamp_source: "auto"
 
-    #  On ace 2 cameras, select FrameStart, ExposureStart, or ExposureEnd for
-    #  BslChunkTimestampValue. ExposureStart is usually the useful sensor time.
+    #  On ace 2 cameras, select FrameStart, ExposureStart, ExposureMidpoint, or
+    #  ExposureEnd. ExposureMidpoint uses ExposureStart plus half of the
+    #  acquisition stream's exposure time, including Exposure Auto transitions.
     camera_timestamp_selector: "ExposureStart"
 
-    #  Reject required camera timestamps whose epoch differs grossly from ROS.
+    #  Reject required camera clock references whose epoch differs from ROS.
+    #  ExposureMidpoint is validated at exposure end, not at its older header.
     camera_timestamp_max_age_ms: 1000.0
 
     #  Set false when a synchronization manager must prove PTP lock and then
