@@ -477,6 +477,10 @@ protected:
     // Created on first compressed frame (Basler Compression Beyond).
     std::unique_ptr<Pylon::CImageDecompressor> image_decompressor_;
     std::vector<uint8_t> decompress_scratch_;
+    // PixelFormat changes only through setImageEncoding(). Cache its ROS name
+    // to avoid a GigE GenICam control read in every acquisition iteration.
+    mutable std::mutex ros_encoding_cache_mutex_;
+    mutable std::string current_ros_encoding_cache_;
     mutable std::mutex cached_grab_result_mutex_;
     Pylon::CGrabResultPtr cached_grab_result_;
     mutable bool bit_shift_active_cache_ = false;
