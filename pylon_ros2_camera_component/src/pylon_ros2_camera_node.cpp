@@ -801,11 +801,19 @@ bool PylonROS2CameraNode::startGrabbing()
       if (this->camera_info_manager_->loadCameraInfo(this->pylon_camera_parameter_set_.cameraInfoURL()))
       {
         this->setupRectification();
-        // Set the correct tf frame_id and preserve an active hardware ROI when
-        // the calibration file replaces the initial CameraInfo message.
+        // Set the correct tf frame_id.  A calibration whose dimensions match
+        // the acquired image is already expressed in the image's pixel
+        // coordinates, so its ROI must remain authoritative (normally the ROS
+        // all-zero "full calibration frame" value).  Grafting the camera's
+        // absolute sensor offset onto such a calibration would shift K/P a
+        // second time in image_geometry.  Preserve the hardware ROI only when
+        // the calibration describes a different, full-sensor coordinate frame.
         sensor_msgs::msg::CameraInfo cam_info = this->camera_info_manager_->getCameraInfo();
         cam_info.header.frame_id = this->img_raw_msg_.header.frame_id;
-        if (this->pylon_camera_->isROIActive())
+        const bool calibration_matches_acquired_image =
+          cam_info.width == this->img_raw_msg_.width &&
+          cam_info.height == this->img_raw_msg_.height;
+        if (this->pylon_camera_->isROIActive() && !calibration_matches_acquired_image)
         {
           cam_info.roi = this->pylon_camera_->currentROI();
         }

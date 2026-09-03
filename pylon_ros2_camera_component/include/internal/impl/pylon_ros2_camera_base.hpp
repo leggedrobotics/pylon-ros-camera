@@ -191,6 +191,16 @@ size_t PylonROS2CameraImpl<CameraTraitT>::currentBinningY()
 template <typename CameraTraitT>
 std::string PylonROS2CameraImpl<CameraTraitT>::currentROSEncoding() const
 {
+    std::uint64_t generation_at_read;
+    {
+        std::lock_guard<std::mutex> lock(ros_encoding_cache_mutex_);
+        if (!current_ros_encoding_cache_.empty())
+        {
+            return current_ros_encoding_cache_;
+        }
+        generation_at_read = ros_encoding_generation_;
+    }
+
     std::string gen_api_encoding(cam_->PixelFormat.ToString().c_str());
     std::string ros_encoding("");
 
@@ -205,6 +215,17 @@ std::string PylonROS2CameraImpl<CameraTraitT>::currentROSEncoding() const
         //cam_->StartGrabbing();
         grabbingStarting();
         //return "NO_ENCODING";
+    }
+
+    if (!ros_encoding.empty())
+    {
+        std::lock_guard<std::mutex> lock(ros_encoding_cache_mutex_);
+        // Only publish this result if the encoding did not change while the
+        // device was being read; otherwise it is already stale.
+        if (ros_encoding_generation_ == generation_at_read)
+        {
+            current_ros_encoding_cache_ = ros_encoding;
+        }
     }
 
     return ros_encoding;
@@ -1202,6 +1223,14 @@ std::string PylonROS2CameraImpl<CameraTraitT>::setImageEncoding(const std::strin
                 (gen_api_encoding == "BayerRG12" || gen_api_encoding == "BayerBG12" ||
                  gen_api_encoding == "BayerGB12" || gen_api_encoding == "BayerGR12" ||
                  gen_api_encoding == "Mono12");
+            std::string current_ros_encoding;
+            {
+                std::lock_guard<std::mutex> lock(ros_encoding_cache_mutex_);
+                current_ros_encoding_cache_ =
+                    encodingconversions::genAPI2Ros(gen_api_encoding, current_ros_encoding)
+                    ? current_ros_encoding : std::string();
+                ++ros_encoding_generation_;
+            }
             return "done";
         }
         else
