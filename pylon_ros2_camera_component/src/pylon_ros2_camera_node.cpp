@@ -155,10 +155,23 @@ bool PylonROS2CameraNode::init()
   }
 
   // The blaze topics only carry data from a blaze camera, so advertise them only
-  // for one. init() also runs on reconnect, hence the guard.
-  if (this->pylon_camera_->isBlaze() && !this->blaze_cloud_pub_)
+  // for one. init() also runs on reconnect, where the device that comes back may
+  // be a different type, so match the publishers to it either way.
+  if (this->pylon_camera_->isBlaze())
   {
-    this->initBlazePublishers();
+    if (!this->blaze_cloud_pub_)
+    {
+      this->initBlazePublishers();
+    }
+  }
+  else
+  {
+    this->blaze_cloud_pub_.reset();
+    this->blaze_intensity_pub_.reset();
+    this->blaze_depth_map_pub_.reset();
+    this->blaze_depth_map_color_pub_.reset();
+    this->blaze_confidence_pub_.reset();
+    this->blaze_cam_info_pub_.reset();
   }
 
   // starting the grabbing procedure with the desired image-settings
