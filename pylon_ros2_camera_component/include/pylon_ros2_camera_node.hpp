@@ -164,6 +164,11 @@ protected:
    * @brief initialize the node publishers
    */
   void initPublishers();
+
+  /**
+   * @brief initialize the blaze publishers, only once the camera is known to be a blaze
+   */
+  void initBlazePublishers();
   
   /**
    * @brief initialize the node services

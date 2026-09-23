@@ -154,6 +154,13 @@ bool PylonROS2CameraNode::init()
     return false;
   }
 
+  // The blaze topics only carry data from a blaze camera, so advertise them only
+  // for one. init() also runs on reconnect, hence the guard.
+  if (this->pylon_camera_->isBlaze() && !this->blaze_cloud_pub_)
+  {
+    this->initBlazePublishers();
+  }
+
   // starting the grabbing procedure with the desired image-settings
   if (!this->startGrabbing())
   {
@@ -206,8 +213,13 @@ void PylonROS2CameraNode::initPublishers()
   // and causing incomplete GigE frames. SensorDataQoS keeps acquisition live.
   this->img_raw_pub_ = image_transport::create_camera_publisher(
     this, msg_name, rmw_qos_profile_sensor_data);
+}
 
-  // blaze related topics
+void PylonROS2CameraNode::initBlazePublishers()
+{
+  std::string msg_name;
+  std::string msg_prefix = "~/";
+
   msg_name = msg_prefix + "blaze_cloud"; this->blaze_cloud_topic_name_ = msg_name;
   this->blaze_cloud_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(msg_name, 10);
   msg_name = msg_prefix + "blaze_intensity"; this->blaze_intensity_topic_name_ = msg_name;
