@@ -29,6 +29,7 @@
 #include <GenApi/GenApi.h>
 
 #include <rclcpp/logger.hpp>
+#include <rmw/qos_profiles.h>
 #include <signal.h>
 #include <pthread.h>
 #include <chrono>
@@ -112,6 +113,11 @@ PylonROS2CameraNode::PylonROS2CameraNode(const rclcpp::NodeOptions& options)
 PylonROS2CameraNode::~PylonROS2CameraNode()
 {
   this->stop_spinning_ = true;
+  if (this->pylon_camera_ != nullptr)
+  {
+    // Also covers component unloading without a preceding rclcpp shutdown.
+    this->pylon_camera_->grabbingStopping();
+  }
   if (this->spin_thread_.joinable())
   {
     this->spin_thread_.join();
@@ -180,13 +186,18 @@ bool PylonROS2CameraNode::init()
     return false;
   }
 
+  this->initCameraTypePublishers();
+
   // cache flags to avoid per-frame string comparisons in the grab path
   // These only concern the 2D grab path (chunk timestamps and 12-bit Bayer
   // shifting). 3D cameras use grab3D() and have no 2D ROS encoding, so skip
   // this to avoid querying currentROSEncoding() on a 3D pixel format.
   if (!this->pylon_camera_->is3D())
   {
-    this->pylon_camera_->chunk_mode_active_ = (this->pylon_camera_->getChunkModeActive() == 1);
+    if (this->pylon_camera_parameter_set_.timestamp_source_ != "camera")
+    {
+      this->pylon_camera_->chunk_mode_active_ = (this->pylon_camera_->getChunkModeActive() == 1);
+    }
     const std::string ros_enc = this->pylon_camera_->currentROSEncoding();
     const std::string gen_api_enc = this->pylon_camera_->currentBaslerEncoding();
     this->pylon_camera_->bit_shift_active_ = encodingconversions::is_12_bit_ros_enc(ros_enc) &&
@@ -196,6 +207,18 @@ bool PylonROS2CameraNode::init()
       RCLCPP_INFO(LOGGER, "Activated chunk mode");
     if (this->pylon_camera_->bit_shift_active_)
       RCLCPP_INFO(LOGGER, "Activated bit shifting");
+  }
+
+  if (!this->pylon_camera_parameter_set_.start_grabbing_immediately_)
+  {
+    const std::string stop_result = this->pylon_camera_->grabbingStopping();
+    if (stop_result.find("done") == std::string::npos)
+    {
+      RCLCPP_ERROR_STREAM(LOGGER, "Failed to defer image acquisition for synchronization: " << stop_result);
+      return false;
+    }
+    this->grabbing_enabled_ = false;
+    RCLCPP_INFO(LOGGER, "Image acquisition is paused until the start_grabbing service releases it");
   }
 
   return true;
@@ -223,35 +246,62 @@ void PylonROS2CameraNode::initPublishers()
   this->component_status_pub_ = this->create_publisher<pylon_ros2_camera_interfaces::msg::ComponentStatus>(msg_name, 5);
 
   msg_name = msg_prefix + "image_raw";
-  this->img_raw_pub_ = image_transport::create_camera_publisher(this, msg_name);
+  // Reliable delivery can block the grab loop behind a slow subscriber until
+  // every Pylon buffer is used and GigE frames arrive incomplete.
+  this->img_raw_pub_ = image_transport::create_camera_publisher(this, msg_name, rmw_qos_profile_sensor_data);
 
-  // 3D related topics
   // Note: ROS 2 topic name tokens must not start with a digit, so the 3D
   // topics use a trailing "_3d" suffix (e.g. cloud_3d) rather than a "3d_"
-  // prefix.
-  msg_name = msg_prefix + "cloud_3d"; this->cloud_3d_topic_name_ = msg_name;
-  this->cloud_3d_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(msg_name, 10);
-  msg_name = msg_prefix + "intensity_3d"; this->intensity_3d_topic_name_ = msg_name;
-  this->intensity_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(msg_name, 10);
-  msg_name = msg_prefix + "depth_map_3d"; this->depth_map_3d_topic_name_ = msg_name;
-  this->depth_map_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(msg_name, 10);
-  msg_name = msg_prefix + "depth_map_color_3d"; this->depth_map_color_3d_topic_name_ = msg_name;
-  this->depth_map_color_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(msg_name, 10);
-  msg_name = msg_prefix + "confidence_3d"; this->confidence_3d_topic_name_ = msg_name;
-  this->confidence_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(msg_name, 10);
-  msg_name = msg_prefix + "camera_info_3d";
-  this->cam_info_3d_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(msg_name, 10);
-  // Extra intensity topics (e.g. Stereo mini left/right IR). Publishers are
-  // created unconditionally; they will simply have no subscribers for cameras
-  // that don't provide extra intensity images.
-  msg_name = msg_prefix + "intensity_left_3d"; this->intensity_left_3d_topic_name_ = msg_name;
-  this->intensity_left_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(msg_name, 10);
-  msg_name = msg_prefix + "intensity_right_3d"; this->intensity_right_3d_topic_name_ = msg_name;
-  this->intensity_right_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(msg_name, 10);
-  // IMU topic (e.g. Stereo mini). Created unconditionally; it only publishes
-  // when the camera has an enabled IMU.
-  msg_name = msg_prefix + "imu"; this->imu_topic_name_ = msg_name;
-  this->imu_pub_ = this->create_publisher<sensor_msgs::msg::Imu>(msg_name, 100);
+  // prefix. The publishers are created in initCameraTypePublishers().
+  this->cloud_3d_topic_name_ = msg_prefix + "cloud_3d";
+  this->intensity_3d_topic_name_ = msg_prefix + "intensity_3d";
+  this->depth_map_3d_topic_name_ = msg_prefix + "depth_map_3d";
+  this->depth_map_color_3d_topic_name_ = msg_prefix + "depth_map_color_3d";
+  this->confidence_3d_topic_name_ = msg_prefix + "confidence_3d";
+  this->intensity_left_3d_topic_name_ = msg_prefix + "intensity_left_3d";
+  this->intensity_right_3d_topic_name_ = msg_prefix + "intensity_right_3d";
+  this->imu_topic_name_ = msg_prefix + "imu";
+}
+
+void PylonROS2CameraNode::initCameraTypePublishers()
+{
+  // init() also runs on reconnect, where the device may be a different type.
+  if (this->pylon_camera_->is3D())
+  {
+    if (!this->cloud_3d_pub_)
+    {
+      this->cloud_3d_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(this->cloud_3d_topic_name_, 10);
+      this->intensity_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(this->intensity_3d_topic_name_, 10);
+      this->depth_map_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(this->depth_map_3d_topic_name_, 10);
+      this->depth_map_color_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(this->depth_map_color_3d_topic_name_, 10);
+      this->confidence_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(this->confidence_3d_topic_name_, 10);
+      this->cam_info_3d_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>("~/camera_info_3d", 10);
+    }
+    if (this->pylon_camera_->hasExtraIntensityImages() && !this->intensity_left_3d_pub_)
+    {
+      this->intensity_left_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(this->intensity_left_3d_topic_name_, 10);
+      this->intensity_right_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(this->intensity_right_3d_topic_name_, 10);
+    }
+  }
+  else
+  {
+    this->cloud_3d_pub_.reset();
+    this->intensity_3d_pub_.reset();
+    this->depth_map_3d_pub_.reset();
+    this->depth_map_color_3d_pub_.reset();
+    this->confidence_3d_pub_.reset();
+    this->cam_info_3d_pub_.reset();
+  }
+  if (!this->pylon_camera_->hasExtraIntensityImages())
+  {
+    this->intensity_left_3d_pub_.reset();
+    this->intensity_right_3d_pub_.reset();
+  }
+  // Kept once created: the IMU thread publishes on it without a lock.
+  if (this->pylon_camera_->hasIMU() && !this->imu_pub_)
+  {
+    this->imu_pub_ = this->create_publisher<sensor_msgs::msg::Imu>(this->imu_topic_name_, 100);
+  }
 }
 
 void PylonROS2CameraNode::initServices()
@@ -428,6 +478,9 @@ void PylonROS2CameraNode::initServices()
 
   srv_name = srv_prefix + "set_ptp_priority";
   this->set_ptp_priority_srv_ = this->create_service<SetIntegerSrv>(srv_name, std::bind(&PylonROS2CameraNode::setPTPPriorityCallback, this, _1, _2));
+
+  srv_name = srv_prefix + "set_ptp_servo_locked_threshold";
+  this->set_ptp_servo_locked_threshold_srv_ = this->create_service<SetIntegerSrv>(srv_name, std::bind(&PylonROS2CameraNode::setPTPServoLockedThresholdCallback, this, _1, _2));
   
   srv_name = srv_prefix + "set_ptp_profile";
   this->set_ptp_profile_srv_ = this->create_service<SetIntegerSrv>(srv_name, std::bind(&PylonROS2CameraNode::setPTPProfileCallback, this, _1, _2));
@@ -770,7 +823,15 @@ bool PylonROS2CameraNode::initAndRegister()
     return false;
   }
 
-  if (!this->pylon_camera_->registerCameraConfiguration())
+  // CSoftwareTriggerConfiguration re-enables the FrameStart software trigger on
+  // every StartGrabbing(), overriding whatever profile the camera holds. With
+  // "CurrentSetting" keep pylon's default free-run configuration instead.
+  if (this->pylon_camera_parameter_set_.startup_user_set_ == "CurrentSetting" &&
+      !this->pylon_camera_->is3D())
+  {
+    RCLCPP_INFO(LOGGER, "startup_user_set is 'CurrentSetting': not forcing the software trigger, camera runs free if its trigger is off");
+  }
+  else if (!this->pylon_camera_->registerCameraConfiguration())
   {
     RCLCPP_ERROR_STREAM(LOGGER, "Error while registering the camera configuration to software-trigger mode!");
     this->cm_status_.status_id = pylon_ros2_camera_interfaces::msg::ComponentStatus::ERROR;
@@ -912,10 +973,15 @@ bool PylonROS2CameraNode::startGrabbing()
       if (this->camera_info_manager_->loadCameraInfo(this->pylon_camera_parameter_set_.cameraInfoURL()))
       {
         this->setupRectification();
-        // set the correct tf frame_id and current ROI from camera
+        // Set the correct tf frame_id. A calibration of the acquired image size
+        // is already in its pixel coordinates, so its ROI stays authoritative;
+        // the hardware ROI only applies to a full-sensor calibration.
         sensor_msgs::msg::CameraInfo cam_info = this->camera_info_manager_->getCameraInfo();
         cam_info.header.frame_id = this->img_raw_msg_.header.frame_id;
-        if (this->pylon_camera_->isROIActive())
+        const bool calibration_matches_acquired_image =
+          cam_info.width == this->img_raw_msg_.width &&
+          cam_info.height == this->img_raw_msg_.height;
+        if (this->pylon_camera_->isROIActive() && !calibration_matches_acquired_image)
         {
           cam_info.roi = this->pylon_camera_->currentROI();
         }
@@ -1103,16 +1169,29 @@ void PylonROS2CameraNode::spin()
 
   double frame_step = 1.0 / this->frameRate();
 
+  // An active stream is paced by RetrieveResult(). Only wait out the frame
+  // period when no frame was acquired, so the loop never sleeps past a frame.
+  auto wait_for_next_cycle = [frame_step](double start_time)
+  {
+    const double sleep_time = frame_step - (rclcpp::Clock().now().seconds() - start_time);
+    if (sleep_time > 0)
+    {
+      std::this_thread::sleep_for(std::chrono::duration<double>(sleep_time));
+    }
+  };
+
   while (!this->stop_spinning_ && rclcpp::ok())
   {
+    double start_time = 0.0;
     // Wrap the whole iteration in try/catch: if rclcpp::shutdown() races
     // with any rclcpp API call in the body (Clock, publish,
     // count_subscribers, ...) after the context is invalidated, the
     // resulting std::runtime_error is caught here and we exit cleanly.
     try
     {
-      double start_time = rclcpp::Clock().now().seconds();
+      start_time = rclcpp::Clock().now().seconds();
       double tdiff; // used to compute time difference during the grabbing process
+      bool acquired_frame = false;
 
       // check if the camera is disconnected
       // the call time cost to isCamRemoved() is unsignificant with respect to the grabbing frame rate
@@ -1149,6 +1228,12 @@ void PylonROS2CameraNode::spin()
         continue;
       }
 
+      if (!this->grabbing_enabled_)
+      {
+        wait_for_next_cycle(start_time);
+        continue;
+      }
+
       // grab
       RCLCPP_DEBUG(LOGGER, ">>> New frame grabbing <<<");
 
@@ -1163,8 +1248,10 @@ void PylonROS2CameraNode::spin()
         {
           if (!this->grabImage())
           {
+            wait_for_next_cycle(start_time);
             continue;
           }
+          acquired_frame = true;
         }
 
         // compute grab time
@@ -1237,8 +1324,10 @@ void PylonROS2CameraNode::spin()
 
           if (!this->grabImage())
           {
+            wait_for_next_cycle(start_time);
             continue;
           }
+          acquired_frame = true;
 
           // compute grab time
           double grab_time = rclcpp::Clock().now().seconds();
@@ -1313,25 +1402,21 @@ void PylonROS2CameraNode::spin()
       double loop_frame_rate = 1.0 / tdiff;
       RCLCPP_DEBUG_STREAM(LOGGER, "Actual spinning frame rate: " << loop_frame_rate);
 
-      // the user has set a frame rate - wait accordingly to respect it
-      if (tdiff > 0)  // just in case of but should never happen
+      if (!acquired_frame)
       {
-        double sleep_time = frame_step - tdiff;
-        std::this_thread::sleep_for(std::chrono::duration<double>(sleep_time));
+        wait_for_next_cycle(start_time);
       }
-
-      // compute actual frame rate, just to check
-      double check_loop_it_time = rclcpp::Clock().now().seconds();
-      tdiff = check_loop_it_time - start_time;
-      double check_frame_rate = 1.0 / tdiff;
-      RCLCPP_DEBUG_STREAM(LOGGER, "Spinning frame rate (to check): " << check_frame_rate);
     } // end try
     catch (const std::exception& e)
     {
-      // An rclcpp API was called after context invalidation during shutdown.
-      // Exit the loop cleanly instead of propagating the exception.
-      (void)e;
-      break;
+      // During shutdown an rclcpp API may be called after context
+      // invalidation: exit cleanly. Anything else must not end acquisition.
+      if (!rclcpp::ok() || this->stop_spinning_)
+      {
+        break;
+      }
+      RCLCPP_ERROR_STREAM(LOGGER, "Acquisition loop exception: " << e.what());
+      wait_for_next_cycle(start_time);
     }
   }
 }
@@ -1351,13 +1436,45 @@ bool PylonROS2CameraNode::grabImage()
     // especially important for external trigger cameras where grab() blocks until the
     // trigger fires.
     rclcpp::Time stamp;
-    if (!this->pylon_camera_->grab(this->img_raw_msg_.data, stamp))
+    rclcpp::Duration timestamp_validation_offset = rclcpp::Duration::from_nanoseconds(0);
+    if (!this->pylon_camera_->grab(this->img_raw_msg_.data, stamp, &timestamp_validation_offset))
     {
       return false;
     }
     if (stamp.nanoseconds() == 0)
     {
+      if (this->pylon_camera_parameter_set_.timestamp_source_ == "camera")
+      {
+        RCLCPP_ERROR_THROTTLE(LOGGER, *this->get_clock(), 5000,
+            "Camera hardware timestamp is required but absent; dropping frame without host fallback");
+        return false;
+      }
       stamp = rclcpp::Node::now();
+    }
+    else if (this->pylon_camera_parameter_set_.timestamp_source_ == "camera")
+    {
+      const int64_t header_age_ns = rclcpp::Node::now().nanoseconds() - stamp.nanoseconds();
+      const int64_t age_ns = header_age_ns - timestamp_validation_offset.nanoseconds();
+      const double age_ms = static_cast<double>(age_ns) / 1.0e6;
+      const double header_age_ms = static_cast<double>(header_age_ns) / 1.0e6;
+
+      if (std::abs(age_ms) > this->pylon_camera_parameter_set_.camera_timestamp_max_age_ms_)
+      {
+        RCLCPP_ERROR_THROTTLE(LOGGER, *this->get_clock(), 5000,
+            "Camera timestamp differs from the ROS clock by %.3f ms (header age %.3f ms, "
+            "exposure offset %.3f ms, limit %.3f ms); dropping frame",
+            age_ms, header_age_ms,
+            static_cast<double>(timestamp_validation_offset.nanoseconds()) / 1.0e6,
+            this->pylon_camera_parameter_set_.camera_timestamp_max_age_ms_);
+        return false;
+      }
+
+      if (!this->camera_timestamp_validated_)
+      {
+        RCLCPP_INFO_STREAM(LOGGER, "Camera hardware timestamp validated against ROS time; first-frame header age "
+            << header_age_ms << " ms, validation age " << age_ms << " ms");
+        this->camera_timestamp_validated_ = true;
+      }
     }
     this->img_raw_msg_.header.stamp = stamp;
   }
@@ -3546,6 +3663,8 @@ void PylonROS2CameraNode::setOutputQueueSizeCallback(const std::shared_ptr<SetIn
 void PylonROS2CameraNode::setMaxNumBufferCallback(const std::shared_ptr<SetIntegerSrv::Request> request,
                                                   std::shared_ptr<SetIntegerSrv::Response> response)
 {
+  // Restarts the stream grabber; serialize with the acquisition thread.
+  std::lock_guard<std::recursive_mutex> lock(this->grab_mutex_);
   response->message = this->pylon_camera_->setMaxNumBuffer(request->value);
 
   if (response->message.find("done") != std::string::npos)
@@ -3600,6 +3719,13 @@ void PylonROS2CameraNode::setTimerTriggerSourceCallback(const std::shared_ptr<Se
   {
     response->success = false;
   }
+}
+
+void PylonROS2CameraNode::setPTPServoLockedThresholdCallback(const std::shared_ptr<SetIntegerSrv::Request> request,
+                                                             std::shared_ptr<SetIntegerSrv::Response> response)
+{
+  response->message = this->pylon_camera_->setPTPServoLockedThreshold(request->value);
+  response->success = response->message.find("done") != std::string::npos;
 }
 
 void PylonROS2CameraNode::setPTPPriorityCallback(const std::shared_ptr<SetIntegerSrv::Request> request,
@@ -4793,6 +4919,8 @@ void PylonROS2CameraNode::startGrabbingCallback(const std::shared_ptr<TriggerSrv
   response->message = this->grabbingStarting();
   if (response->message.find("done") != std::string::npos)
   {
+    this->camera_timestamp_validated_ = false;
+    this->grabbing_enabled_ = true;
     response->success = true;
   }
   else 
@@ -4805,6 +4933,7 @@ void PylonROS2CameraNode::stopGrabbingCallback(const std::shared_ptr<TriggerSrv:
                                                std::shared_ptr<TriggerSrv::Response> response)
 {
   (void)request;
+  const bool was_enabled = this->grabbing_enabled_.exchange(false);
   response->message = this->grabbingStopping();
   if (response->message.find("done") != std::string::npos)
   {
@@ -4812,6 +4941,7 @@ void PylonROS2CameraNode::stopGrabbingCallback(const std::shared_ptr<TriggerSrv:
   }
   else 
   {
+    this->grabbing_enabled_ = was_enabled;
     response->success = false;
   }
 }

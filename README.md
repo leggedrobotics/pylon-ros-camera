@@ -309,6 +309,18 @@ The topic name follows the `[Camera name]/[Node name]/imu` convention, so replac
 - **frame_rate**  
   The desired acquisition frame rate corresponding to the driver spinning frame rate. Calling the GrabImages-Action can result in a higher frame rate.
 
+- **timestamp_source**  
+  Selects the `Image.header.stamp` source. `auto` uses an enabled timestamp chunk when available and otherwise post-grab ROS time. `host` always uses post-grab ROS time. `camera` configures and requires a hardware timestamp chunk; frames without a valid camera timestamp are not published.
+
+- **camera_timestamp_selector**  
+  Selects the image timestamp: `FrameStart`, `ExposureStart`, `ExposureMidpoint`, or `ExposureEnd`. `ExposureMidpoint` adds half of the acquisition stream's exposure time to the ace 2 `ExposureStart` hardware timestamp, so it follows manual and automatic exposure changes without a per-frame control-channel read. Cameras exposing only the legacy `ChunkTimestamp` support `FrameStart`.
+
+- **camera_timestamp_max_age_ms**  
+  Maximum absolute difference between the camera clock and the ROS clock when `timestamp_source` is `camera`. Frames outside this bound are rejected, detecting an incompatible clock epoch or an unlocked camera clock.
+
+- **start_grabbing_immediately**  
+  When false, the camera is initialized with acquisition paused. A synchronization manager can then configure and verify PTP before releasing acquisition through the `start_grabbing` service.
+
 - **shutter_mode**  
   Set mode of camera's shutter if the value is not empty. The supported modes are 'rolling', 'global' and 'global_reset'. Default value is '' (empty)
 

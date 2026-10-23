@@ -170,6 +170,11 @@ protected:
    * @brief initialize the node publishers
    */
   void initPublishers();
+
+  /**
+   * @brief create or drop the 3D and IMU publishers to match the opened camera
+   */
+  void initCameraTypePublishers();
   
   /**
    * @brief initialize the node services
@@ -992,6 +997,14 @@ protected:
    */
   void setPTPPriorityCallback(const std::shared_ptr<SetIntegerSrv::Request> request,
                               std::shared_ptr<SetIntegerSrv::Response> response);
+
+  /**
+   * @brief Set the ace 2 PTP servo locked threshold in nanoseconds.
+   * @param req request
+   * @param res response
+   */
+  void setPTPServoLockedThresholdCallback(const std::shared_ptr<SetIntegerSrv::Request> request,
+                                          std::shared_ptr<SetIntegerSrv::Response> response);
   
   /**
    * @brief Service callback for setting the ptp profile - Applies to: ace 2 GigE.
@@ -1876,6 +1889,7 @@ protected:
   rclcpp::Service<SetIntegerSrv>::SharedPtr set_timer_selector_srv_;
   rclcpp::Service<SetIntegerSrv>::SharedPtr set_timer_trigger_source_srv_;
   rclcpp::Service<SetIntegerSrv>::SharedPtr set_ptp_priority_srv_;
+  rclcpp::Service<SetIntegerSrv>::SharedPtr set_ptp_servo_locked_threshold_srv_;
   rclcpp::Service<SetIntegerSrv>::SharedPtr set_ptp_profile_srv_;
   rclcpp::Service<SetIntegerSrv>::SharedPtr set_ptp_network_mode_srv_;
   rclcpp::Service<SetIntegerSrv>::SharedPtr set_ptp_uc_port_address_index_srv_;
@@ -1975,6 +1989,8 @@ protected:
   // spinning thread
   std::thread spin_thread_;
   std::atomic<bool> stop_spinning_;
+  std::atomic<bool> grabbing_enabled_{true};
+  std::atomic<bool> camera_timestamp_validated_{false};
   // IMU publishing thread (only used for cameras with an enabled IMU)
   std::thread imu_publish_thread_;
   // mutex

@@ -28,6 +28,8 @@
 
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -189,6 +191,16 @@ size_t PylonROS2CameraImpl<CameraTraitT>::currentBinningY()
 template <typename CameraTraitT>
 std::string PylonROS2CameraImpl<CameraTraitT>::currentROSEncoding() const
 {
+    std::uint64_t generation_at_read;
+    {
+        std::lock_guard<std::mutex> lock(ros_encoding_cache_mutex_);
+        if (!current_ros_encoding_cache_.empty())
+        {
+            return current_ros_encoding_cache_;
+        }
+        generation_at_read = ros_encoding_generation_;
+    }
+
     RCLCPP_INFO_STREAM_ONCE(LOGGER_BASE, "Camera's currently set pixel format is " << this->currentBaslerEncoding());
 
     std::string gen_api_encoding(cam_->PixelFormat.ToString().c_str());
@@ -207,7 +219,31 @@ std::string PylonROS2CameraImpl<CameraTraitT>::currentROSEncoding() const
         //return "NO_ENCODING";
     }
 
+    if (!ros_encoding.empty())
+    {
+        std::lock_guard<std::mutex> lock(ros_encoding_cache_mutex_);
+        if (ros_encoding_generation_ == generation_at_read)
+        {
+            current_ros_encoding_cache_ = ros_encoding;
+        }
+    }
+
     return ros_encoding;
+}
+
+template <typename CameraTrait>
+Pylon::CBaslerUniversalGrabResultPtr PylonROS2CameraImpl<CameraTrait>::getCachedGrabResult() const
+{
+    std::lock_guard<std::mutex> lock(cached_grab_result_mutex_);
+    return Pylon::CBaslerUniversalGrabResultPtr(cached_grab_result_);
+}
+
+template <typename CameraTraitT>
+void PylonROS2CameraImpl<CameraTraitT>::invalidateROSEncodingCache() const
+{
+    std::lock_guard<std::mutex> lock(ros_encoding_cache_mutex_);
+    current_ros_encoding_cache_.clear();
+    ++ros_encoding_generation_;
 }
 
 template <typename CameraTraitT>
@@ -354,6 +390,139 @@ bool PylonROS2CameraImpl<CameraTraitT>::setupSequencer(const std::vector<float>&
 }
 
 template <typename CameraTraitT>
+bool PylonROS2CameraImpl<CameraTraitT>::configureTimestamping(
+    const PylonROS2CameraParameter& parameters)
+{
+    camera_timestamp_uses_bsl_ = false;
+    camera_timestamp_midpoint_ = false;
+    previous_chunk_exposure_us_ = std::numeric_limits<double>::quiet_NaN();
+
+    if (parameters.timestamp_source_ == "host")
+    {
+        timestamp_mode_ = TimestampMode::Host;
+        RCLCPP_INFO(LOGGER_BASE, "Image headers will use the post-grab ROS clock");
+        return true;
+    }
+
+    if (parameters.timestamp_source_ == "auto")
+    {
+        timestamp_mode_ = TimestampMode::Auto;
+        RCLCPP_INFO(LOGGER_BASE,
+            "Image timestamp source is auto: use a readable camera chunk, otherwise post-grab ROS time");
+        return true;
+    }
+
+    timestamp_mode_ = TimestampMode::Camera;
+
+    try
+    {
+        if (!GenApi::IsWritable(cam_->ChunkModeActive) ||
+            !GenApi::IsWritable(cam_->ChunkSelector) ||
+            !GenApi::IsWritable(cam_->ChunkEnable))
+        {
+            RCLCPP_ERROR(LOGGER_BASE,
+                "Camera timestamps were required, but timestamp chunks cannot be configured");
+            return false;
+        }
+
+        // Basler requires chunk mode, the Timestamp selector, and ChunkEnable.
+        // Configure these while acquisition is stopped; no control-channel
+        // reads or selector writes are then needed in the per-frame hot path.
+        cam_->ChunkModeActive.SetValue(true);
+        cam_->ChunkSelector.SetValue(
+            Basler_UniversalCameraParams::ChunkSelectorEnums::ChunkSelector_Timestamp);
+
+        if (GenApi::IsAvailable(cam_->BslChunkTimestampSelector))
+        {
+            if (!GenApi::IsWritable(cam_->BslChunkTimestampSelector))
+            {
+                RCLCPP_ERROR(LOGGER_BASE,
+                    "BslChunkTimestampSelector is available but not writable while configuring timestamps");
+                return false;
+            }
+
+            if (parameters.camera_timestamp_selector_ == "FrameStart")
+            {
+                cam_->BslChunkTimestampSelector.SetValue(
+                    Basler_UniversalCameraParams::BslChunkTimestampSelectorEnums::
+                    BslChunkTimestampSelector_FrameStart);
+            }
+            else if (parameters.camera_timestamp_selector_ == "ExposureEnd")
+            {
+                cam_->BslChunkTimestampSelector.SetValue(
+                    Basler_UniversalCameraParams::BslChunkTimestampSelectorEnums::
+                    BslChunkTimestampSelector_ExposureEnd);
+            }
+            else
+            {
+                cam_->BslChunkTimestampSelector.SetValue(
+                    Basler_UniversalCameraParams::BslChunkTimestampSelectorEnums::
+                    BslChunkTimestampSelector_ExposureStart);
+            }
+
+            camera_timestamp_uses_bsl_ = true;
+        }
+        else if (parameters.camera_timestamp_selector_ != "FrameStart")
+        {
+            RCLCPP_ERROR_STREAM(LOGGER_BASE,
+                "The camera only exposes legacy ChunkTimestamp (FrameStart), but "
+                << parameters.camera_timestamp_selector_ << " was required");
+            return false;
+        }
+
+        cam_->ChunkEnable.SetValue(true);
+
+        if (parameters.camera_timestamp_selector_ == "ExposureMidpoint")
+        {
+            // The camera has no native midpoint event. Keep the timestamp chunk
+            // on ExposureStart and enable the exposure value carried in the
+            // acquisition stream. No per-frame GigE control read is required.
+            cam_->ChunkSelector.SetValue(
+                Basler_UniversalCameraParams::ChunkSelectorEnums::ChunkSelector_ExposureTime);
+
+            if (GenApi::IsAvailable(cam_->ChunkExposureTimeSelector) &&
+                GenApi::IsWritable(cam_->ChunkExposureTimeSelector))
+            {
+                cam_->ChunkExposureTimeSelector.SetValue(
+                    Basler_UniversalCameraParams::ChunkExposureTimeSelectorEnums::
+                    ChunkExposureTimeSelector_Common);
+            }
+
+            if (!GenApi::IsWritable(cam_->ChunkEnable))
+            {
+                RCLCPP_ERROR(LOGGER_BASE,
+                    "ExposureMidpoint requires a writable ExposureTime chunk");
+                return false;
+            }
+            cam_->ChunkEnable.SetValue(true);
+
+            // Leave the timestamp chunk selected after enabling ExposureTime.
+            cam_->ChunkSelector.SetValue(
+                Basler_UniversalCameraParams::ChunkSelectorEnums::ChunkSelector_Timestamp);
+            cam_->BslChunkTimestampSelector.SetValue(
+                Basler_UniversalCameraParams::BslChunkTimestampSelectorEnums::
+                BslChunkTimestampSelector_ExposureStart);
+            cam_->ChunkEnable.SetValue(true);
+            camera_timestamp_midpoint_ = true;
+        }
+
+        chunk_mode_active_ = true;
+
+        RCLCPP_INFO_STREAM(LOGGER_BASE,
+            "Camera hardware timestamps enabled: "
+            << (camera_timestamp_uses_bsl_ ? "BslChunkTimestampValue/" : "ChunkTimestamp/")
+            << parameters.camera_timestamp_selector_);
+        return true;
+    }
+    catch (const GenICam::GenericException& e)
+    {
+        RCLCPP_ERROR_STREAM(LOGGER_BASE,
+            "Failed to configure required camera timestamps: " << e.GetDescription());
+        return false;
+    }
+}
+
+template <typename CameraTraitT>
 bool PylonROS2CameraImpl<CameraTraitT>::startGrabbing(const PylonROS2CameraParameter& parameters)
 {
     try
@@ -392,7 +561,60 @@ bool PylonROS2CameraImpl<CameraTraitT>::startGrabbing(const PylonROS2CameraParam
             }
         }
 
+        // Changing PixelFormat resets ImageCompressionMode on ace2 cameras,
+        // so (re-)apply the compression setup after the encoding is final.
+        if (!parameters.image_compression_mode_.empty() && parameters.image_compression_mode_ != "Off")
+        {
+            try
+            {
+                GenApi::CEnumerationPtr comp_mode = cam_->GetNodeMap().GetNode("ImageCompressionMode");
+                comp_mode->FromString(parameters.image_compression_mode_.c_str());
+                if (!parameters.image_compression_rate_option_.empty())
+                {
+                    GenApi::CEnumerationPtr rate_option = cam_->GetNodeMap().GetNode("ImageCompressionRateOption");
+                    if (rate_option.IsValid() && GenApi::IsWritable(rate_option))
+                    {
+                        rate_option->FromString(parameters.image_compression_rate_option_.c_str());
+                    }
+                }
+                GenApi::CFloatPtr comp_ratio = cam_->GetNodeMap().GetNode("BslImageCompressionRatio");
+                if (comp_ratio.IsValid() && GenApi::IsWritable(comp_ratio))
+                {
+                    comp_ratio->SetValue(parameters.image_compression_ratio_);
+                }
+                RCLCPP_INFO_STREAM(LOGGER_BASE, "Image compression enabled: " << parameters.image_compression_mode_
+                        << ", ratio " << parameters.image_compression_ratio_ << "%");
+            }
+            catch (const GenICam::GenericException& e)
+            {
+                RCLCPP_ERROR_STREAM(LOGGER_BASE, "Failed to enable image compression: " << e.GetDescription());
+            }
+        }
+
+        if (!configureTimestamping(parameters))
+        {
+            return false;
+        }
+
         grab_strategy_ = parameters.grab_strategy_;
+        if (parameters.frame_retention_ > 0 &&
+            GenApi::IsWritable(cam_->GetStreamGrabberParams().FrameRetention))
+        {
+            cam_->GetStreamGrabberParams().FrameRetention.SetValue(parameters.frame_retention_);
+            RCLCPP_INFO_STREAM(LOGGER_BASE, "GigE frame retention set to "
+                << parameters.frame_retention_ << " ms");
+        }
+        if (parameters.socket_buffer_size_ > 0 &&
+            GenApi::IsWritable(cam_->GetStreamGrabberParams().SocketBufferSize))
+        {
+            auto& socket_buffer = cam_->GetStreamGrabberParams().SocketBufferSize;
+            const int64_t requested = parameters.socket_buffer_size_;
+            const int64_t bounded = std::max(
+                socket_buffer.GetMin(), std::min(socket_buffer.GetMax(), requested));
+            socket_buffer.SetValue(bounded);
+            RCLCPP_INFO_STREAM(LOGGER_BASE, "GigE socket receive buffer set to "
+                << bounded << " bytes");
+        }
         //cam_->StartGrabbing();
         grabbingStarting();
         user_output_selector_enums_ = detectAndCountNumUserOutputs();
@@ -426,14 +648,57 @@ bool PylonROS2CameraImpl<CameraTraitT>::startGrabbing(const PylonROS2CameraParam
     return true;
 }
 
+template <typename CameraTrait>
+bool PylonROS2CameraImpl<CameraTrait>::decompressGrabResult(const Pylon::CBaslerUniversalGrabResultPtr& grab_result,
+                                                            uint8_t* dest, size_t dest_size)
+{
+    try
+    {
+        if (!image_decompressor_)
+        {
+            image_decompressor_ = std::make_unique<Pylon::CImageDecompressor>(cam_->GetNodeMap());
+        }
+        size_t out_size = dest_size;
+        image_decompressor_->DecompressImage(dest, &out_size, grab_result->GetBuffer(),
+                                             grab_result->GetPayloadSize());
+        return true;
+    }
+    catch (const GenICam::GenericException& e)
+    {
+        RCLCPP_ERROR_STREAM(LOGGER_BASE, "Failed to decompress image: " << e.GetDescription());
+        return false;
+    }
+}
+
+// Raw pixel pointer for a grab result: the grab buffer itself, or @p scratch
+// after decompression when the camera streams with Basler Compression Beyond.
+template <typename CameraTrait>
+const uint8_t* PylonROS2CameraImpl<CameraTrait>::rawImageData(const Pylon::CBaslerUniversalGrabResultPtr& grab_result,
+                                                              std::vector<uint8_t>& scratch)
+{
+    Pylon::CompressionInfo_t info;
+    if (!Pylon::CImageDecompressor::GetCompressionInfo(info, grab_result) || !info.hasCompressedImage)
+    {
+        return reinterpret_cast<uint8_t*>(grab_result->GetBuffer());
+    }
+    scratch.resize(info.decompressedImageSize);
+    return decompressGrabResult(grab_result, scratch.data(), scratch.size()) ? scratch.data() : nullptr;
+}
+
 // Grab a picture as std::vector of 8bits objects
 template <typename CameraTrait>
-bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image, rclcpp::Time &stamp)
+bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image,
+                                            rclcpp::Time &stamp,
+                                            rclcpp::Duration* timestamp_validation_offset)
 {
     // Reset stamp to zero. It will only be set to a non-zero value if a hardware
     // acquisition timestamp is available via chunk data. The caller can test
     // stamp.nanoseconds() == 0 to know whether a hardware timestamp was provided.
     stamp = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    if (timestamp_validation_offset != nullptr)
+    {
+        *timestamp_validation_offset = rclcpp::Duration::from_nanoseconds(0);
+    }
 
     // If camera is not grabbing, don't grab
     if (!cam_->IsGrabbing())
@@ -447,8 +712,18 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image, rclcpp:
         RCLCPP_ERROR(LOGGER_BASE, "Error: Grab was not successful");
         return false;
     }
-    
-    const uint8_t *pImageBuffer = reinterpret_cast<uint8_t*>(ptr_grab_result->GetBuffer());
+
+    Pylon::CompressionInfo_t comp_info;
+    const bool compressed = Pylon::CImageDecompressor::GetCompressionInfo(comp_info, ptr_grab_result)
+                            && comp_info.hasCompressedImage;
+    if (compressed && comp_info.compressionStatus != Pylon::CompressionStatus_Ok)
+    {
+        // Camera could not compress this frame to the configured ratio; the
+        // image data was discarded on-camera. Skip the frame.
+        RCLCPP_WARN_THROTTLE(LOGGER_BASE, *rclcpp::Clock::make_shared(), 5000,
+            "Frame dropped: on-camera compression failed (raise image_compression_ratio)");
+        return false;
+    }
 
     // ------------------------------------------------------------------------
     // Bit shifting
@@ -456,47 +731,122 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image, rclcpp:
     // In case of 12 bits we need to shift the image bits 4 positions to the left
     if (this->bit_shift_active_)
     {
+        const uint8_t *pImageBuffer = rawImageData(ptr_grab_result, decompress_scratch_);
+        if (pImageBuffer == nullptr)
+        {
+            return false;
+        }
         std::vector<uint16_t> shift_array(img_size_byte_ / 2); // Dynamically allocated to avoid heap size error
-        const uint16_t *convert_bits = reinterpret_cast<uint16_t*>(ptr_grab_result->GetBuffer());
+        const uint16_t *convert_bits = reinterpret_cast<const uint16_t*>(pImageBuffer);
         for (size_t i = 0; i < img_size_byte_ / 2; i++)
         {
             shift_array[i] = convert_bits[i] << 4;
         }
         image.assign(reinterpret_cast<uint8_t *>(shift_array.data()), reinterpret_cast<uint8_t *>(shift_array.data()) + img_size_byte_);
     } 
+    else if (compressed)
+    {
+        // Decompress straight into the output buffer - no intermediate copy.
+        image.resize(img_size_byte_);
+        if (!decompressGrabResult(ptr_grab_result, image.data(), image.size()))
+        {
+            return false;
+        }
+    }
     else 
     {
+        const uint8_t *pImageBuffer = reinterpret_cast<uint8_t*>(ptr_grab_result->GetBuffer());
         image.assign(pImageBuffer, pImageBuffer + img_size_byte_);
     }
 
-    if (this->chunk_mode_active_)
+    bool inspect_timestamp_chunk = timestamp_mode_ == TimestampMode::Camera;
+    if (timestamp_mode_ == TimestampMode::Auto)
     {
-    bool use_chunk_timestamp = false;
-        const std::string success = this->setChunkSelector(29); // = ChunkSelector_Timestamp
-        if (success.find("done") != std::string::npos && this->getChunkEnable() == 1)
-        {
-            use_chunk_timestamp = true;
-        }
+        // Reading fields from the grab result is local; no per-frame GigE
+        // selector write or ChunkEnable read is needed.
+        inspect_timestamp_chunk = this->chunk_mode_active_;
+    }
 
-    if (use_chunk_timestamp)
+    if (inspect_timestamp_chunk)
     {
         try
         {
-            if (!ptr_grab_result->ChunkTimestamp.IsReadable())
+            // ace 2 exposes the event-selectable Bsl timestamp. In strict
+            // camera mode, never substitute legacy FrameStart for a requested
+            // ExposureStart/ExposureEnd value.
+            if ((camera_timestamp_uses_bsl_ || timestamp_mode_ == TimestampMode::Auto) &&
+                ptr_grab_result->BslChunkTimestampValue.IsReadable())
             {
-                RCLCPP_WARN_STREAM(LOGGER_BASE, "Error while trying to get the chunk timestamp. The connected camera may not support this feature");
+                uint64_t timestamp_ns = static_cast<uint64_t>(
+                    ptr_grab_result->BslChunkTimestampValue.GetValue());
+
+                if (camera_timestamp_midpoint_)
+                {
+                    if (!ptr_grab_result->ChunkExposureTime.IsReadable())
+                    {
+                        RCLCPP_ERROR_THROTTLE(LOGGER_BASE, *rclcpp::Clock::make_shared(), 5000,
+                            "ExposureMidpoint requires ChunkExposureTime on every frame");
+                        return false;
+                    }
+
+                    const double chunk_exposure_us =
+                        ptr_grab_result->ChunkExposureTime.GetValue();
+                    if (!std::isfinite(chunk_exposure_us) || chunk_exposure_us <= 0.0)
+                    {
+                        RCLCPP_ERROR_STREAM(LOGGER_BASE,
+                            "Invalid per-frame ChunkExposureTime: "
+                            << chunk_exposure_us << " us");
+                        return false;
+                    }
+
+                    // A queued transition frame can carry the newly selected
+                    // manual/auto exposure even though the previous setting
+                    // produced its pixels. Prefer the current chunk normally,
+                    // but fall back one value when it would put exposure end in
+                    // the future for an image that has already arrived.
+                    double exposure_us = chunk_exposure_us;
+                    constexpr int64_t future_tolerance_ns = 5000000;
+                    const int64_t now_ns =
+                        timestamp_validation_clock_.now().nanoseconds();
+                    const int64_t current_exposure_end_ns =
+                        static_cast<int64_t>(timestamp_ns) +
+                        static_cast<int64_t>(std::llround(chunk_exposure_us * 1000.0));
+                    if (current_exposure_end_ns > now_ns + future_tolerance_ns &&
+                        std::isfinite(previous_chunk_exposure_us_) &&
+                        previous_chunk_exposure_us_ > 0.0)
+                    {
+                        exposure_us = previous_chunk_exposure_us_;
+                    }
+                    previous_chunk_exposure_us_ = chunk_exposure_us;
+
+                    // Basler reports exposure in microseconds and timestamps in
+                    // nanoseconds. Round to the nearest nanosecond.
+                    const int64_t half_exposure_ns = static_cast<int64_t>(
+                        std::llround(exposure_us * 500.0));
+                    timestamp_ns += static_cast<uint64_t>(half_exposure_ns);
+                    if (timestamp_validation_offset != nullptr)
+                    {
+                        *timestamp_validation_offset =
+                            rclcpp::Duration::from_nanoseconds(half_exposure_ns);
+                    }
+                }
+
+                stamp = rclcpp::Time(timestamp_ns);
             }
-            else
+            else if (!camera_timestamp_uses_bsl_ &&
+                     ptr_grab_result->ChunkTimestamp.IsReadable())
             {
-                stamp = rclcpp::Time(static_cast<uint64_t>(ptr_grab_result->ChunkTimestamp.GetValue()));
+                stamp = rclcpp::Time(static_cast<uint64_t>(
+                    ptr_grab_result->ChunkTimestamp.GetValue()));
             }
         }
         catch (const GenICam::GenericException &e)
         {
-            RCLCPP_WARN_STREAM(LOGGER_BASE, "An exception while getting the chunk timestamp occurred: " << e.GetDescription());
+            RCLCPP_WARN_STREAM(LOGGER_BASE,
+                "An exception while reading the per-frame camera timestamp occurred: "
+                << e.GetDescription());
         }
     }
-    } // end chunk_mode_active_
 
     if (!is_ready_)
         is_ready_ = true;
@@ -521,21 +871,39 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(uint8_t* image)
         return false;
     }
 
+    Pylon::CompressionInfo_t comp_info;
+    const bool compressed = Pylon::CImageDecompressor::GetCompressionInfo(comp_info, ptr_grab_result)
+                            && comp_info.hasCompressedImage;
+    if (compressed && comp_info.compressionStatus != Pylon::CompressionStatus_Ok)
+    {
+        return false;
+    }
+
     // ------------------------------------------------------------------------
     // Bit shifting
     // ------------------------------------------------------------------------
     // In case of 12 bits we need to shift the image bits 4 positions to the left
-    std::string ros_enc = currentROSEncoding();
-
-    if (encodingconversions::is_12_bit_ros_enc(ros_enc))
+    if (this->bit_shift_active_)
     {
+        const uint8_t *pImageBuffer = rawImageData(ptr_grab_result, decompress_scratch_);
+        if (pImageBuffer == nullptr)
+        {
+            return false;
+        }
         std::vector<uint16_t> shift_array(img_size_byte_ / 2);
-        const uint16_t *convert_bits = reinterpret_cast<uint16_t*>(ptr_grab_result->GetBuffer());
+        const uint16_t *convert_bits = reinterpret_cast<const uint16_t*>(pImageBuffer);
         for (size_t i = 0; i < img_size_byte_ / 2; i++)
         {
             shift_array[i] = convert_bits[i] << 4;
         }
         memcpy(image, shift_array.data(), 2 * shift_array.size());
+    }
+    else if (compressed)
+    {
+        if (!decompressGrabResult(ptr_grab_result, image, img_size_byte_))
+        {
+            return false;
+        }
     }
     else
     {
@@ -568,10 +936,15 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(Pylon::CBaslerUniversalGrabResultPtr
 
     try
     {
+        // Reading TriggerMode is a ~2.5 ms GigE control round trip; cache it.
+        if (trigger_mode_cache_ == -99)
+        {
+            trigger_mode_cache_ = (cam_->TriggerMode.GetValue() == TriggerModeEnums::TriggerMode_On) ? 1 : 0;
+        }
         // WaitForFrameTriggerReady to prevent trigger signal to get lost
         // this could happen, if 2xExecuteSoftwareTrigger() is only followed by 1xgrabResult()
         // -> 2nd trigger might get lost
-        if ((cam_->TriggerMode.GetValue() == TriggerModeEnums::TriggerMode_On))
+        if (trigger_mode_cache_ == 1)
         {
             if (!cam_->CanWaitForFrameTriggerReady())
             {
@@ -630,6 +1003,11 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(Pylon::CBaslerUniversalGrabResultPtr
         if (grab_result.IsValid())
             RCLCPP_ERROR_STREAM(LOGGER_BASE, "Error: " << grab_result->GetErrorCode() << " " << grab_result->GetErrorDescription());
         return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(cached_grab_result_mutex_);
+        cached_grab_result_ = static_cast<Pylon::CGrabResultPtr>(grab_result);
     }
 
     return true;
@@ -847,6 +1225,14 @@ std::string PylonROS2CameraImpl<CameraTraitT>::setImageEncoding(const std::strin
             grabbingStarting();
             cam_->StopGrabbing();
             GenApi::CEnumerationPtr(node_map.GetNode("PixelFormat"))->FromString(gen_api_encoding.c_str());
+            std::string current_ros_encoding;
+            {
+                std::lock_guard<std::mutex> lock(ros_encoding_cache_mutex_);
+                current_ros_encoding_cache_ =
+                    encodingconversions::genAPI2Ros(gen_api_encoding, current_ros_encoding)
+                    ? current_ros_encoding : std::string();
+                ++ros_encoding_generation_;
+            }
             return "done";
         }
         else
@@ -1201,6 +1587,17 @@ bool PylonROS2CameraImpl<CameraTraitT>::setGain(const float& target_gain,
 }
 
 template <typename CameraTraitT>
+double PylonROS2CameraImpl<CameraTraitT>::convertBrightness(const int& value)
+{
+    // AutoTargetValue (older GigE) is 0-255; AutoTargetBrightness (USB, ace 2) is 0.0-1.0.
+    if (!GenApi::IsAvailable(cam_->AutoTargetValue) && GenApi::IsAvailable(cam_->AutoTargetBrightness))
+    {
+        return value / 255.0;
+    }
+    return value;
+}
+
+template <typename CameraTraitT>
 bool PylonROS2CameraImpl<CameraTraitT>::setBrightness(const int& target_brightness,
                                                   const float& current_brightness,
                                                   const bool& exposure_auto,
@@ -1211,8 +1608,7 @@ bool PylonROS2CameraImpl<CameraTraitT>::setBrightness(const int& target_brightne
         // if the target brightness is greater 255, limit it to 255
         // the brightness_to_set is a float value, regardless of the current
         // pixel data output format, i.e., 0.0 -> black, 1.0 -> white.
-        typename CameraTraitT::AutoTargetBrightnessValueType brightness_to_set =
-            CameraTraitT::convertBrightness(std::min(255, target_brightness));
+        const double brightness_to_set = convertBrightness(std::min(255, target_brightness));
 /**
 #if DEBUG
         std::cout << "br = " << current_brightness << ", gain = "
@@ -1344,7 +1740,7 @@ bool PylonROS2CameraImpl<CameraTraitT>::setBrightness(const int& target_brightne
     {
         RCLCPP_ERROR_STREAM(LOGGER_BASE, "An generic exception while setting target brightness to "
                 << target_brightness << " (= "
-                << CameraTraitT::convertBrightness(std::min(255, target_brightness))
+                << convertBrightness(std::min(255, target_brightness))
                 <<  ") occurred: " << e.GetDescription());
         return false;
     }
@@ -1375,8 +1771,7 @@ bool PylonROS2CameraImpl<CameraTraitT>::setExtendedBrightness(const int& target_
         return false;
     }
 
-    typename CameraTraitT::AutoTargetBrightnessValueType brightness_to_set =
-        CameraTraitT::convertBrightness(target_brightness);
+    const double brightness_to_set = convertBrightness(target_brightness);
 
     if ( !binary_exp_search_ )
     {
@@ -2072,6 +2467,7 @@ std::string PylonROS2CameraImpl<CameraTraitT>::setTriggerMode(const bool& value)
             {
                 cam_->TriggerMode.SetValue(TriggerModeEnums::TriggerMode_Off);
             }
+            trigger_mode_cache_ = -99;
         }
         else
         {
@@ -3086,6 +3482,8 @@ std::string PylonROS2CameraImpl<CameraTraitT>::loadUserSet()
     {
         grabbingStopping();
         cam_->UserSetLoad.Execute();
+        trigger_mode_cache_ = -99;
+        invalidateROSEncodingCache();
         grabbingStarting();
     }
     catch ( const GenICam::GenericException &e )
@@ -3146,6 +3544,8 @@ std::string PylonROS2CameraImpl<CameraTraitT>::loadPfs(const std::string& fileNa
         Pylon::String_t fileNameCStr = fileName.c_str();
         RCLCPP_INFO_STREAM(LOGGER_BASE, "Loading the pfs file: " << fileNameCStr );
         Pylon::CFeaturePersistence::Load(fileNameCStr, &cam_->GetNodeMap(), true);
+        trigger_mode_cache_ = -99;
+        invalidateROSEncodingCache();
         grabbingStarting();
     }
     catch ( const GenICam::GenericException &e )
@@ -3307,6 +3707,7 @@ std::string PylonROS2CameraImpl<CameraTraitT>::grabbingStarting() const
         {
             cam_->StartGrabbing(Pylon::EGrabStrategy::GrabStrategy_LatestImageOnly);
             RCLCPP_DEBUG(LOGGER_BASE, "Grabbing started (GrabStrategy_LatestImageOnly)");
+            trigger_mode_cache_ = -99;
             return "done";
         }
 
@@ -3314,11 +3715,13 @@ std::string PylonROS2CameraImpl<CameraTraitT>::grabbingStarting() const
         {
             cam_->StartGrabbing(Pylon::EGrabStrategy::GrabStrategy_LatestImages);
             RCLCPP_DEBUG(LOGGER_BASE, "Grabbing started (GrabStrategy_LatestImages)");
+            trigger_mode_cache_ = -99;
             return "done";
         }
 
         cam_->StartGrabbing(Pylon::EGrabStrategy::GrabStrategy_OneByOne);
         RCLCPP_DEBUG(LOGGER_BASE, "Grabbing started (GrabStrategy_OneByOne)");
+        trigger_mode_cache_ = -99;
 
         return "done";
     }
@@ -3335,6 +3738,10 @@ std::string PylonROS2CameraImpl<CameraTraitT>::grabbingStopping()
     try
     {
         cam_->StopGrabbing();
+        {
+            std::lock_guard<std::mutex> lock(cached_grab_result_mutex_);
+            cached_grab_result_.Release();
+        }
         RCLCPP_DEBUG(LOGGER_BASE, "Grabbing stopped");
         return "done";
     }
@@ -3435,9 +3842,16 @@ template <typename CameraTraitT>
 std::string PylonROS2CameraImpl<CameraTraitT>::setMaxNumBuffer(const int& size) {
     if (GenApi::IsAvailable(cam_->MaxNumBuffer)){
         try {
-            grabbingStopping();
+            const bool was_grabbing = cam_->IsGrabbing();
+            if (was_grabbing)
+            {
+                grabbingStopping();
+            }
             cam_->MaxNumBuffer.SetValue(size);
-            grabbingStarting();
+            if (was_grabbing)
+            {
+                grabbingStarting();
+            }
             return "done";
         } catch ( const GenICam::GenericException &e ){
                 RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while setting the Maximum number of buffers size occurred:" << e.GetDescription());
@@ -3606,6 +4020,7 @@ std::string PylonROS2CameraImpl<CameraTraitT>::setChunkModeActive(const bool& en
             //cam_->StopGrabbing();
             cam_->ChunkModeActive.SetValue(enable);
             //grabbingStarting();
+            this->chunk_mode_active_ = enable;
 
             if (enable)
                 RCLCPP_DEBUG(LOGGER_BASE, "Chunk mode active enabled");
@@ -4040,20 +4455,10 @@ int64_t PylonROS2CameraImpl<CameraTraitT>::getChunkTimestamp()
         return -3;  // not grabbing
     }
 
-    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result;
-    try
-    {
-        cam_->TriggerSoftware.Execute();
-        cam_->RetrieveResult(5000, ptr_grab_result, Pylon::TimeoutHandling_ThrowException);
-        //std::cout << "GrabSucceeded: " << ptr_grab_result->GrabSucceeded() << std::endl;
-    }
-    catch (const GenICam::GenericException &e)
-    {
-        RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while trying to grab prior to chunk timestamp access: " << e.GetDescription());
-        return -3;  // exception
-    }
-
-    if (!ptr_grab_result->GrabSucceeded())
+    // The acquisition thread owns RetrieveResult(); read the chunks of its
+    // latest frame instead of grabbing (and dropping) another one.
+    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result = getCachedGrabResult();
+    if (!ptr_grab_result.IsValid() && !this->grab(ptr_grab_result))
     {
         RCLCPP_WARN(LOGGER_BASE, "Grab was not successful prior to chunk timestamp access");
         return -3;  // did not manage to grab
@@ -4094,20 +4499,10 @@ float PylonROS2CameraImpl<CameraTraitT>::getChunkExposureTime()
         return -3.0;  // not grabbing
     }
 
-    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result;
-    try
-    {
-        cam_->TriggerSoftware.Execute();
-        cam_->RetrieveResult(5000, ptr_grab_result, Pylon::TimeoutHandling_ThrowException);
-        //std::cout << "GrabSucceeded: " << ptr_grab_result->GrabSucceeded() << std::endl;
-    }
-    catch (const GenICam::GenericException &e)
-    {
-        RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while trying to grab prior to chunk exposure access: " << e.GetDescription());
-        return -3.0;  // exception
-    }
-
-    if (!ptr_grab_result->GrabSucceeded())
+    // The acquisition thread owns RetrieveResult(); read the chunks of its
+    // latest frame instead of grabbing (and dropping) another one.
+    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result = getCachedGrabResult();
+    if (!ptr_grab_result.IsValid() && !this->grab(ptr_grab_result))
     {
         RCLCPP_WARN(LOGGER_BASE, "Grab was not successful prior to chunk exposure access");
         return -3.0;  // did not manage to grab
@@ -4166,20 +4561,10 @@ int64_t PylonROS2CameraImpl<CameraTraitT>::getChunkLineStatusAll()
         return -3;  // not grabbing
     }
 
-    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result;
-    try
-    {
-        cam_->TriggerSoftware.Execute();
-        cam_->RetrieveResult(5000, ptr_grab_result, Pylon::TimeoutHandling_ThrowException);
-        //std::cout << "GrabSucceeded: " << ptr_grab_result->GrabSucceeded() << std::endl;
-    }
-    catch (const GenICam::GenericException &e)
-    {
-        RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while trying to grab prior to chunk line status all access: " << e.GetDescription());
-        return -3;  // exception
-    }
-
-    if (!ptr_grab_result->GrabSucceeded())
+    // The acquisition thread owns RetrieveResult(); read the chunks of its
+    // latest frame instead of grabbing (and dropping) another one.
+    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result = getCachedGrabResult();
+    if (!ptr_grab_result.IsValid() && !this->grab(ptr_grab_result))
     {
         RCLCPP_WARN(LOGGER_BASE, "Grab was not successful prior to chunk line status all access");
         return -3;  // did not manage to grab
@@ -4220,20 +4605,10 @@ int64_t PylonROS2CameraImpl<CameraTraitT>::getChunkFramecounter()
         return -3;  // not grabbing
     }
 
-    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result;
-    try
-    {
-        cam_->TriggerSoftware.Execute();
-        cam_->RetrieveResult(5000, ptr_grab_result, Pylon::TimeoutHandling_ThrowException);
-        //std::cout << "GrabSucceeded: " << ptr_grab_result->GrabSucceeded() << std::endl;
-    }
-    catch (const GenICam::GenericException &e)
-    {
-        RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while trying to grab prior to chunk frame counter access: " << e.GetDescription());
-        return -3;  // exception
-    }
-
-    if (!ptr_grab_result->GrabSucceeded())
+    // The acquisition thread owns RetrieveResult(); read the chunks of its
+    // latest frame instead of grabbing (and dropping) another one.
+    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result = getCachedGrabResult();
+    if (!ptr_grab_result.IsValid() && !this->grab(ptr_grab_result))
     {
         RCLCPP_WARN(LOGGER_BASE, "Grab was not successful prior to chunk frame counter access");
         return -3;  // did not manage to grab
@@ -4274,20 +4649,10 @@ int64_t PylonROS2CameraImpl<CameraTraitT>::getChunkCounterValue()
         return -3;  // not grabbing
     }
 
-    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result;
-    try
-    {
-        cam_->TriggerSoftware.Execute();
-        cam_->RetrieveResult(5000, ptr_grab_result, Pylon::TimeoutHandling_ThrowException);
-        //std::cout << "GrabSucceeded: " << ptr_grab_result->GrabSucceeded() << std::endl;
-    }
-    catch (const GenICam::GenericException &e)
-    {
-        RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while trying to grab prior to chunk counter value access: " << e.GetDescription());
-        return -3;  // exception
-    }
-
-    if (!ptr_grab_result->GrabSucceeded())
+    // The acquisition thread owns RetrieveResult(); read the chunks of its
+    // latest frame instead of grabbing (and dropping) another one.
+    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result = getCachedGrabResult();
+    if (!ptr_grab_result.IsValid() && !this->grab(ptr_grab_result))
     {
         RCLCPP_WARN(LOGGER_BASE, "Grab was not successful prior to chunk counter value access");
         return -3;  // did not manage to grab
@@ -4499,6 +4864,29 @@ std::string PylonROS2CameraImpl<CameraTraitT>::setTimerDuration(const float& dur
     }
 
     return "done";
+}
+
+template <typename CameraTraitT>
+std::string PylonROS2CameraImpl<CameraTraitT>::setPTPServoLockedThreshold(const int& value)
+{
+    try
+    {
+        if (GenApi::IsWritable(cam_->BslPtpServoLockedThreshold))
+        {
+            cam_->BslPtpServoLockedThreshold.SetValue(value);
+            return "done";
+        }
+        RCLCPP_ERROR_STREAM(LOGGER_BASE,
+            "The connected camera does not support a writable PTP servo locked threshold.");
+        return "The connected camera does not support this feature";
+    }
+    catch (const GenICam::GenericException &e)
+    {
+        RCLCPP_ERROR_STREAM(LOGGER_BASE,
+            "An exception while setting the PTP servo locked threshold:"
+            << e.GetDescription());
+        return e.GetDescription();
+    }
 }
 
 template <typename CameraTraitT>

@@ -227,6 +227,7 @@ public:
     virtual std::string setTimerDuration(const float& duration) override;
     virtual std::string setMaxTransferSize(const int& maxTransferSize) override;
     virtual std::string setPTPPriority(const int& value) override;
+    virtual std::string setPTPServoLockedThreshold(const int& value) override;
     virtual std::string setPTPProfile(const int& value) override;
     virtual std::string setPTPNetworkMode(const int& value) override;
     virtual std::string setPTPUCPortAddressIndex(const int& value) override;
@@ -2047,6 +2048,7 @@ std::string PylonROS2StereoAceCamera::setTimerTriggerSource(const int& /*source*
 std::string PylonROS2StereoAceCamera::setTimerDuration(const float& /*duration*/) { return "Feature not available for this camera type"; }
 std::string PylonROS2StereoAceCamera::setMaxTransferSize(const int& /*maxTransferSize*/) { return "Feature not available for this camera type"; }
 std::string PylonROS2StereoAceCamera::setPTPPriority(const int& /*value*/) { return "Feature not available for this camera type"; }
+std::string PylonROS2StereoAceCamera::setPTPServoLockedThreshold(const int& /*value*/) { return "Feature not available for this camera type"; }
 std::string PylonROS2StereoAceCamera::setPTPProfile(const int& /*value*/) { return "Feature not available for this camera type"; }
 std::string PylonROS2StereoAceCamera::setPTPNetworkMode(const int& /*value*/) { return "Feature not available for this camera type"; }
 std::string PylonROS2StereoAceCamera::setPTPUCPortAddressIndex(const int& /*value*/) { return "Feature not available for this camera type"; }

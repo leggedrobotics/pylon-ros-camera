@@ -33,8 +33,13 @@
 #pragma GCC diagnostic ignored "-Wliteral-suffix"
 #include <pylon/BaslerUniversalGrabResultPtr.h>
 #include <pylon/PylonIncludes.h>
+#include <pylon/ImageDecompressor.h>
 #include <GenApi/IEnumEntry.h>
 #pragma GCC diagnostic pop
+#include <cstdint>
+#include <limits>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <map>
@@ -70,7 +75,9 @@ public:
 
     virtual bool startGrabbing(const PylonROS2CameraParameter& parameters) override;
 
-    virtual bool grab(std::vector<uint8_t>& image, rclcpp::Time &stamp) override;
+    virtual bool grab(std::vector<uint8_t>& image,
+                      rclcpp::Time &stamp,
+                      rclcpp::Duration* timestamp_validation_offset = nullptr) override;
 
     virtual bool grab(uint8_t* image) override;
 
@@ -322,6 +329,8 @@ public:
 
     virtual std::string setPTPPriority(const int& value) override;
 
+    virtual std::string setPTPServoLockedThreshold(const int& value) override;
+
     virtual std::string setPTPProfile(const int& value) override;
 
     virtual std::string setPTPNetworkMode(const int& value) override;
@@ -456,6 +465,21 @@ public:
 
 protected:
 
+    /**
+     * Host-side decompression for Basler Compression Beyond payloads.
+     */
+    bool decompressGrabResult(const Pylon::CBaslerUniversalGrabResultPtr& grab_result,
+                              uint8_t* dest, size_t dest_size);
+    const uint8_t* rawImageData(const Pylon::CBaslerUniversalGrabResultPtr& grab_result,
+                                std::vector<uint8_t>& scratch);
+
+    void invalidateROSEncodingCache() const;
+    Pylon::CBaslerUniversalGrabResultPtr getCachedGrabResult() const;
+
+    // AutoTargetValue and AutoTargetBrightness use different scales; the GigE
+    // trait covers both, so detect the node at runtime.
+    double convertBrightness(const int& value);
+
     typedef typename CameraTraitT::CBaslerInstantCameraT CBaslerInstantCameraT;
     typedef typename CameraTraitT::ExposureAutoEnums ExposureAutoEnums;
     typedef typename CameraTraitT::GainAutoEnums GainAutoEnums;
@@ -487,7 +511,32 @@ protected:
     typedef typename CameraTraitT::TimerSelectorEnums TimerSelectorEnums;
     typedef typename CameraTraitT::TimerTriggerSourceEnums TimerTriggerSourceEnums;
 
+    enum class TimestampMode
+    {
+        Auto,
+        Host,
+        Camera
+    };
+
     CBaslerInstantCameraT* cam_;
+
+    TimestampMode timestamp_mode_ = TimestampMode::Auto;
+    bool camera_timestamp_uses_bsl_ = false;
+    bool camera_timestamp_midpoint_ = false;
+    double previous_chunk_exposure_us_ = std::numeric_limits<double>::quiet_NaN();
+    rclcpp::Clock timestamp_validation_clock_{RCL_SYSTEM_TIME};
+
+    // Created on first compressed frame (Basler Compression Beyond).
+    std::unique_ptr<Pylon::CImageDecompressor> image_decompressor_;
+    std::vector<uint8_t> decompress_scratch_;
+    mutable int trigger_mode_cache_ = -99;
+    // PixelFormat changes only through setImageEncoding(); the generation is
+    // bumped there so a getter that read the device before cannot publish.
+    mutable std::mutex ros_encoding_cache_mutex_;
+    mutable std::string current_ros_encoding_cache_;
+    mutable std::uint64_t ros_encoding_generation_ = 0;
+    mutable std::mutex cached_grab_result_mutex_;
+    Pylon::CGrabResultPtr cached_grab_result_;
 
     // Each camera has it's own getter for GenApi accessors that are named
     // differently for USB and GigE
@@ -505,6 +554,8 @@ protected:
                                        const float& current_brightness) override;
 
     virtual bool grab(Pylon::CBaslerUniversalGrabResultPtr& grab_result);
+
+    bool configureTimestamping(const PylonROS2CameraParameter& parameters);
 
     virtual bool setupSequencer(const std::vector<float>& exposure_times,
                                 std::vector<float>& exposure_times_set);

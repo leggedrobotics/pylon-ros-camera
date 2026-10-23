@@ -263,6 +263,43 @@ public:
     std::string startup_user_set_;
 
     /**
+     * Image header timestamp policy:
+     * - "auto": use an enabled camera timestamp chunk when available, else host time
+     * - "host": always stamp after the completed grab with the ROS clock
+     * - "camera": require and configure a per-frame hardware timestamp chunk
+     */
+    std::string timestamp_source_;
+
+    /**
+     * Image timestamp event: FrameStart, ExposureStart, ExposureMidpoint or
+     * ExposureEnd. ExposureMidpoint combines the ace 2 ExposureStart timestamp
+     * with the exposure carried in the acquisition stream.
+     */
+    std::string camera_timestamp_selector_;
+
+    /**
+     * Maximum absolute difference between the camera clock and the ROS clock.
+     * For ExposureMidpoint the reference is exposure end.
+     */
+    double camera_timestamp_max_age_ms_;
+
+    /**
+     * Start streaming during node initialization. Disable this when an external
+     * synchronization manager must prove PTP lock before allowing publication.
+     */
+    bool start_grabbing_immediately_;
+
+    /**
+     * Basler Compression Beyond: "Off" or "BaslerCompressionBeyond", the rate
+     * option ("Lossless", "FixRatio") and the max transferred size as a
+     * percentage of the raw image. Re-applied after encoding setup because
+     * changing PixelFormat resets it.
+     */
+    std::string image_compression_mode_;
+    std::string image_compression_rate_option_;
+    double image_compression_ratio_;
+
+    /**
      * Illumination mode for the Basler Stereo ace camera.
      * Controls whether the IR projector runs during acquisition:
      *   AlwaysActive (default)    - projector always on; recommended by Basler for
@@ -295,6 +332,17 @@ public:
      * start of image data transmissions from each camera.
      */
     int frame_transmission_delay_;
+
+    /**
+     * Maximum time in milliseconds for the GigE stream grabber to complete a
+     * frame, including packet resends. Only used for GigE cameras.
+     */
+    int frame_retention_;
+
+    /**
+     * Kernel receive socket size in bytes for the Pylon GigE stream grabber.
+     */
+    int socket_buffer_size_;
 
     /**
       Shutter mode

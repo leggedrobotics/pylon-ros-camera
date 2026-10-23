@@ -37,6 +37,25 @@
     #  The maximum possible frame rate is displayed when starting the driver.
     frame_rate: 500.0
 
+    #  Image header timestamp policy:
+    #  "auto" uses an enabled timestamp chunk when available, "host" always uses
+    #  ROS time sampled after a grab, and "camera" requires a hardware timestamp
+    #  on every frame.
+    # timestamp_source: "auto"
+
+    #  On ace 2 cameras, select FrameStart, ExposureStart, ExposureMidpoint, or
+    #  ExposureEnd. ExposureMidpoint uses ExposureStart plus half of the
+    #  acquisition stream's exposure time, including Exposure Auto transitions.
+    # camera_timestamp_selector: "ExposureStart"
+
+    #  Reject required camera timestamps whose clock differs from ROS by more
+    #  than this. ExposureMidpoint is validated at exposure end.
+    # camera_timestamp_max_age_ms: 1000.0
+
+    #  Set false when a synchronization manager must prove PTP lock and then
+    #  release acquisition through the start_grabbing service.
+    # start_grabbing_immediately: true
+
     #  Mode of camera's shutter.
     #  The supported modes are "rolling", "global" and "global_reset"
     #  Default value is "" (empty) means default_shutter_mode
@@ -132,6 +151,15 @@
     #  you can use the frame transmission delay parameter to stagger the
     #  start of image data transmissions from each camera.
     #  frame_transmission_delay: 0
+
+    #  Maximum time in milliseconds to complete a GigE frame, including packet
+    #  resends. Increase this when short receive-side scheduling stalls cause
+    #  incomplete buffers. Only used for GigE cameras.
+    # frame_retention: 100
+
+    #  Pylon GigE receive socket size in bytes. The system rmem_max must permit
+    #  this value. Zero leaves the Pylon transport default unchanged.
+    # socket_buffer_size: 0
 
     #  Timeout in milliseconds passed to RetrieveResult(). Limits how long the driver waits
     #  for image data to arrive after a grab is initiated.
