@@ -61,6 +61,10 @@ PylonROS2CameraParameter::PylonROS2CameraParameter() :
     enable_status_publisher_(false),
     enable_current_params_publisher_(false),
     startup_user_set_(""),
+    timestamp_source_("auto"),
+    camera_timestamp_selector_("ExposureStart"),
+    camera_timestamp_max_age_ms_(1000.0),
+    start_grabbing_immediately_(true),
     image_compression_mode_("Off"),
     image_compression_rate_option_(""),
     image_compression_ratio_(85.0),
@@ -391,6 +395,46 @@ void PylonROS2CameraParameter::readFromRosParameterServer(rclcpp::Node& nh)
     
     nh.get_parameter("startup_user_set", this->startup_user_set_);
 
+    // timestamp_source
+    RCLCPP_DEBUG(LOGGER, "---> timestamp_source");
+
+    if (!nh.has_parameter("timestamp_source"))
+    {
+        nh.declare_parameter<std::string>("timestamp_source", "auto");
+    }
+
+    nh.get_parameter("timestamp_source", this->timestamp_source_);
+
+    // camera_timestamp_selector
+    RCLCPP_DEBUG(LOGGER, "---> camera_timestamp_selector");
+
+    if (!nh.has_parameter("camera_timestamp_selector"))
+    {
+        nh.declare_parameter<std::string>("camera_timestamp_selector", "ExposureStart");
+    }
+
+    nh.get_parameter("camera_timestamp_selector", this->camera_timestamp_selector_);
+
+    // camera_timestamp_max_age_ms
+    RCLCPP_DEBUG(LOGGER, "---> camera_timestamp_max_age_ms");
+
+    if (!nh.has_parameter("camera_timestamp_max_age_ms"))
+    {
+        nh.declare_parameter<double>("camera_timestamp_max_age_ms", 1000.0);
+    }
+
+    nh.get_parameter("camera_timestamp_max_age_ms", this->camera_timestamp_max_age_ms_);
+
+    // start_grabbing_immediately
+    RCLCPP_DEBUG(LOGGER, "---> start_grabbing_immediately");
+
+    if (!nh.has_parameter("start_grabbing_immediately"))
+    {
+        nh.declare_parameter<bool>("start_grabbing_immediately", true);
+    }
+
+    nh.get_parameter("start_grabbing_immediately", this->start_grabbing_immediately_);
+
     // image_compression_mode
     RCLCPP_DEBUG(LOGGER, "---> image_compression_mode");
 
@@ -660,6 +704,36 @@ void PylonROS2CameraParameter::validateParameterSet(rclcpp::Node& nh)
         RCLCPP_WARN_STREAM(LOGGER, "The specified frame rate value - " << this->frame_rate_ << " Hz - is not valid!"
                                 << "-> Will reset it to default value (5 Hz).");
         this->setFrameRate(nh, 5.0);
+    }
+
+    if (this->timestamp_source_ != "auto" &&
+        this->timestamp_source_ != "host" &&
+        this->timestamp_source_ != "camera")
+    {
+        RCLCPP_WARN_STREAM(LOGGER, "Unknown timestamp_source '" << this->timestamp_source_
+            << "'; expected auto, host, or camera. Falling back to auto.");
+        this->timestamp_source_ = "auto";
+        nh.set_parameter(rclcpp::Parameter("timestamp_source", this->timestamp_source_));
+    }
+
+    if (this->camera_timestamp_selector_ != "FrameStart" &&
+        this->camera_timestamp_selector_ != "ExposureStart" &&
+        this->camera_timestamp_selector_ != "ExposureMidpoint" &&
+        this->camera_timestamp_selector_ != "ExposureEnd")
+    {
+        RCLCPP_WARN_STREAM(LOGGER, "Unknown camera_timestamp_selector '"
+            << this->camera_timestamp_selector_
+            << "'; expected FrameStart, ExposureStart, ExposureMidpoint, or ExposureEnd. "
+            << "Falling back to ExposureStart.");
+        this->camera_timestamp_selector_ = "ExposureStart";
+        nh.set_parameter(rclcpp::Parameter("camera_timestamp_selector", this->camera_timestamp_selector_));
+    }
+
+    if (this->camera_timestamp_max_age_ms_ <= 0.0)
+    {
+        RCLCPP_WARN_STREAM(LOGGER, "camera_timestamp_max_age_ms must be positive; falling back to 1000 ms.");
+        this->camera_timestamp_max_age_ms_ = 1000.0;
+        nh.set_parameter(rclcpp::Parameter("camera_timestamp_max_age_ms", this->camera_timestamp_max_age_ms_));
     }
 
     if (this->exposure_given_ && (this->exposure_ <= 0.0 || this->exposure_ > 1e7))

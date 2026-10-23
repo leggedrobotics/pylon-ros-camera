@@ -1984,6 +1984,8 @@ protected:
   // spinning thread
   std::thread spin_thread_;
   std::atomic<bool> stop_spinning_;
+  std::atomic<bool> grabbing_enabled_{true};
+  std::atomic<bool> camera_timestamp_validated_{false};
   // IMU publishing thread (only used for cameras with an enabled IMU)
   std::thread imu_publish_thread_;
   // mutex

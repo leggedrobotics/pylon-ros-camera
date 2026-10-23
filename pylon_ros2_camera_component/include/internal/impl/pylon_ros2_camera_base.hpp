@@ -383,6 +383,139 @@ bool PylonROS2CameraImpl<CameraTraitT>::setupSequencer(const std::vector<float>&
 }
 
 template <typename CameraTraitT>
+bool PylonROS2CameraImpl<CameraTraitT>::configureTimestamping(
+    const PylonROS2CameraParameter& parameters)
+{
+    camera_timestamp_uses_bsl_ = false;
+    camera_timestamp_midpoint_ = false;
+    previous_chunk_exposure_us_ = std::numeric_limits<double>::quiet_NaN();
+
+    if (parameters.timestamp_source_ == "host")
+    {
+        timestamp_mode_ = TimestampMode::Host;
+        RCLCPP_INFO(LOGGER_BASE, "Image headers will use the post-grab ROS clock");
+        return true;
+    }
+
+    if (parameters.timestamp_source_ == "auto")
+    {
+        timestamp_mode_ = TimestampMode::Auto;
+        RCLCPP_INFO(LOGGER_BASE,
+            "Image timestamp source is auto: use a readable camera chunk, otherwise post-grab ROS time");
+        return true;
+    }
+
+    timestamp_mode_ = TimestampMode::Camera;
+
+    try
+    {
+        if (!GenApi::IsWritable(cam_->ChunkModeActive) ||
+            !GenApi::IsWritable(cam_->ChunkSelector) ||
+            !GenApi::IsWritable(cam_->ChunkEnable))
+        {
+            RCLCPP_ERROR(LOGGER_BASE,
+                "Camera timestamps were required, but timestamp chunks cannot be configured");
+            return false;
+        }
+
+        // Basler requires chunk mode, the Timestamp selector, and ChunkEnable.
+        // Configure these while acquisition is stopped; no control-channel
+        // reads or selector writes are then needed in the per-frame hot path.
+        cam_->ChunkModeActive.SetValue(true);
+        cam_->ChunkSelector.SetValue(
+            Basler_UniversalCameraParams::ChunkSelectorEnums::ChunkSelector_Timestamp);
+
+        if (GenApi::IsAvailable(cam_->BslChunkTimestampSelector))
+        {
+            if (!GenApi::IsWritable(cam_->BslChunkTimestampSelector))
+            {
+                RCLCPP_ERROR(LOGGER_BASE,
+                    "BslChunkTimestampSelector is available but not writable while configuring timestamps");
+                return false;
+            }
+
+            if (parameters.camera_timestamp_selector_ == "FrameStart")
+            {
+                cam_->BslChunkTimestampSelector.SetValue(
+                    Basler_UniversalCameraParams::BslChunkTimestampSelectorEnums::
+                    BslChunkTimestampSelector_FrameStart);
+            }
+            else if (parameters.camera_timestamp_selector_ == "ExposureEnd")
+            {
+                cam_->BslChunkTimestampSelector.SetValue(
+                    Basler_UniversalCameraParams::BslChunkTimestampSelectorEnums::
+                    BslChunkTimestampSelector_ExposureEnd);
+            }
+            else
+            {
+                cam_->BslChunkTimestampSelector.SetValue(
+                    Basler_UniversalCameraParams::BslChunkTimestampSelectorEnums::
+                    BslChunkTimestampSelector_ExposureStart);
+            }
+
+            camera_timestamp_uses_bsl_ = true;
+        }
+        else if (parameters.camera_timestamp_selector_ != "FrameStart")
+        {
+            RCLCPP_ERROR_STREAM(LOGGER_BASE,
+                "The camera only exposes legacy ChunkTimestamp (FrameStart), but "
+                << parameters.camera_timestamp_selector_ << " was required");
+            return false;
+        }
+
+        cam_->ChunkEnable.SetValue(true);
+
+        if (parameters.camera_timestamp_selector_ == "ExposureMidpoint")
+        {
+            // The camera has no native midpoint event. Keep the timestamp chunk
+            // on ExposureStart and enable the exposure value carried in the
+            // acquisition stream. No per-frame GigE control read is required.
+            cam_->ChunkSelector.SetValue(
+                Basler_UniversalCameraParams::ChunkSelectorEnums::ChunkSelector_ExposureTime);
+
+            if (GenApi::IsAvailable(cam_->ChunkExposureTimeSelector) &&
+                GenApi::IsWritable(cam_->ChunkExposureTimeSelector))
+            {
+                cam_->ChunkExposureTimeSelector.SetValue(
+                    Basler_UniversalCameraParams::ChunkExposureTimeSelectorEnums::
+                    ChunkExposureTimeSelector_Common);
+            }
+
+            if (!GenApi::IsWritable(cam_->ChunkEnable))
+            {
+                RCLCPP_ERROR(LOGGER_BASE,
+                    "ExposureMidpoint requires a writable ExposureTime chunk");
+                return false;
+            }
+            cam_->ChunkEnable.SetValue(true);
+
+            // Leave the timestamp chunk selected after enabling ExposureTime.
+            cam_->ChunkSelector.SetValue(
+                Basler_UniversalCameraParams::ChunkSelectorEnums::ChunkSelector_Timestamp);
+            cam_->BslChunkTimestampSelector.SetValue(
+                Basler_UniversalCameraParams::BslChunkTimestampSelectorEnums::
+                BslChunkTimestampSelector_ExposureStart);
+            cam_->ChunkEnable.SetValue(true);
+            camera_timestamp_midpoint_ = true;
+        }
+
+        chunk_mode_active_ = true;
+
+        RCLCPP_INFO_STREAM(LOGGER_BASE,
+            "Camera hardware timestamps enabled: "
+            << (camera_timestamp_uses_bsl_ ? "BslChunkTimestampValue/" : "ChunkTimestamp/")
+            << parameters.camera_timestamp_selector_);
+        return true;
+    }
+    catch (const GenICam::GenericException& e)
+    {
+        RCLCPP_ERROR_STREAM(LOGGER_BASE,
+            "Failed to configure required camera timestamps: " << e.GetDescription());
+        return false;
+    }
+}
+
+template <typename CameraTraitT>
 bool PylonROS2CameraImpl<CameraTraitT>::startGrabbing(const PylonROS2CameraParameter& parameters)
 {
     try
@@ -449,6 +582,11 @@ bool PylonROS2CameraImpl<CameraTraitT>::startGrabbing(const PylonROS2CameraParam
             {
                 RCLCPP_ERROR_STREAM(LOGGER_BASE, "Failed to enable image compression: " << e.GetDescription());
             }
+        }
+
+        if (!configureTimestamping(parameters))
+        {
+            return false;
         }
 
         grab_strategy_ = parameters.grab_strategy_;
@@ -542,12 +680,18 @@ const uint8_t* PylonROS2CameraImpl<CameraTrait>::rawImageData(const Pylon::CBasl
 
 // Grab a picture as std::vector of 8bits objects
 template <typename CameraTrait>
-bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image, rclcpp::Time &stamp)
+bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image,
+                                            rclcpp::Time &stamp,
+                                            rclcpp::Duration* timestamp_validation_offset)
 {
     // Reset stamp to zero. It will only be set to a non-zero value if a hardware
     // acquisition timestamp is available via chunk data. The caller can test
     // stamp.nanoseconds() == 0 to know whether a hardware timestamp was provided.
     stamp = rclcpp::Time(0, 0, RCL_ROS_TIME);
+    if (timestamp_validation_offset != nullptr)
+    {
+        *timestamp_validation_offset = rclcpp::Duration::from_nanoseconds(0);
+    }
 
     // If camera is not grabbing, don't grab
     if (!cam_->IsGrabbing())
@@ -608,34 +752,94 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image, rclcpp:
         image.assign(pImageBuffer, pImageBuffer + img_size_byte_);
     }
 
-    if (this->chunk_mode_active_)
+    bool inspect_timestamp_chunk = timestamp_mode_ == TimestampMode::Camera;
+    if (timestamp_mode_ == TimestampMode::Auto)
     {
-    bool use_chunk_timestamp = false;
-        const std::string success = this->setChunkSelector(29); // = ChunkSelector_Timestamp
-        if (success.find("done") != std::string::npos && this->getChunkEnable() == 1)
-        {
-            use_chunk_timestamp = true;
-        }
+        // Reading fields from the grab result is local; no per-frame GigE
+        // selector write or ChunkEnable read is needed.
+        inspect_timestamp_chunk = this->chunk_mode_active_;
+    }
 
-    if (use_chunk_timestamp)
+    if (inspect_timestamp_chunk)
     {
         try
         {
-            if (!ptr_grab_result->ChunkTimestamp.IsReadable())
+            // ace 2 exposes the event-selectable Bsl timestamp. In strict
+            // camera mode, never substitute legacy FrameStart for a requested
+            // ExposureStart/ExposureEnd value.
+            if ((camera_timestamp_uses_bsl_ || timestamp_mode_ == TimestampMode::Auto) &&
+                ptr_grab_result->BslChunkTimestampValue.IsReadable())
             {
-                RCLCPP_WARN_STREAM(LOGGER_BASE, "Error while trying to get the chunk timestamp. The connected camera may not support this feature");
+                uint64_t timestamp_ns = static_cast<uint64_t>(
+                    ptr_grab_result->BslChunkTimestampValue.GetValue());
+
+                if (camera_timestamp_midpoint_)
+                {
+                    if (!ptr_grab_result->ChunkExposureTime.IsReadable())
+                    {
+                        RCLCPP_ERROR_THROTTLE(LOGGER_BASE, *rclcpp::Clock::make_shared(), 5000,
+                            "ExposureMidpoint requires ChunkExposureTime on every frame");
+                        return false;
+                    }
+
+                    const double chunk_exposure_us =
+                        ptr_grab_result->ChunkExposureTime.GetValue();
+                    if (!std::isfinite(chunk_exposure_us) || chunk_exposure_us <= 0.0)
+                    {
+                        RCLCPP_ERROR_STREAM(LOGGER_BASE,
+                            "Invalid per-frame ChunkExposureTime: "
+                            << chunk_exposure_us << " us");
+                        return false;
+                    }
+
+                    // A queued transition frame can carry the newly selected
+                    // manual/auto exposure even though the previous setting
+                    // produced its pixels. Prefer the current chunk normally,
+                    // but fall back one value when it would put exposure end in
+                    // the future for an image that has already arrived.
+                    double exposure_us = chunk_exposure_us;
+                    constexpr int64_t future_tolerance_ns = 5000000;
+                    const int64_t now_ns =
+                        timestamp_validation_clock_.now().nanoseconds();
+                    const int64_t current_exposure_end_ns =
+                        static_cast<int64_t>(timestamp_ns) +
+                        static_cast<int64_t>(std::llround(chunk_exposure_us * 1000.0));
+                    if (current_exposure_end_ns > now_ns + future_tolerance_ns &&
+                        std::isfinite(previous_chunk_exposure_us_) &&
+                        previous_chunk_exposure_us_ > 0.0)
+                    {
+                        exposure_us = previous_chunk_exposure_us_;
+                    }
+                    previous_chunk_exposure_us_ = chunk_exposure_us;
+
+                    // Basler reports exposure in microseconds and timestamps in
+                    // nanoseconds. Round to the nearest nanosecond.
+                    const int64_t half_exposure_ns = static_cast<int64_t>(
+                        std::llround(exposure_us * 500.0));
+                    timestamp_ns += static_cast<uint64_t>(half_exposure_ns);
+                    if (timestamp_validation_offset != nullptr)
+                    {
+                        *timestamp_validation_offset =
+                            rclcpp::Duration::from_nanoseconds(half_exposure_ns);
+                    }
+                }
+
+                stamp = rclcpp::Time(timestamp_ns);
             }
-            else
+            else if (!camera_timestamp_uses_bsl_ &&
+                     ptr_grab_result->ChunkTimestamp.IsReadable())
             {
-                stamp = rclcpp::Time(static_cast<uint64_t>(ptr_grab_result->ChunkTimestamp.GetValue()));
+                stamp = rclcpp::Time(static_cast<uint64_t>(
+                    ptr_grab_result->ChunkTimestamp.GetValue()));
             }
         }
         catch (const GenICam::GenericException &e)
         {
-            RCLCPP_WARN_STREAM(LOGGER_BASE, "An exception while getting the chunk timestamp occurred: " << e.GetDescription());
+            RCLCPP_WARN_STREAM(LOGGER_BASE,
+                "An exception while reading the per-frame camera timestamp occurred: "
+                << e.GetDescription());
         }
     }
-    } // end chunk_mode_active_
 
     if (!is_ready_)
         is_ready_ = true;
@@ -3613,9 +3817,16 @@ template <typename CameraTraitT>
 std::string PylonROS2CameraImpl<CameraTraitT>::setMaxNumBuffer(const int& size) {
     if (GenApi::IsAvailable(cam_->MaxNumBuffer)){
         try {
-            grabbingStopping();
+            const bool was_grabbing = cam_->IsGrabbing();
+            if (was_grabbing)
+            {
+                grabbingStopping();
+            }
             cam_->MaxNumBuffer.SetValue(size);
-            grabbingStarting();
+            if (was_grabbing)
+            {
+                grabbingStarting();
+            }
             return "done";
         } catch ( const GenICam::GenericException &e ){
                 RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while setting the Maximum number of buffers size occurred:" << e.GetDescription());
@@ -3784,6 +3995,7 @@ std::string PylonROS2CameraImpl<CameraTraitT>::setChunkModeActive(const bool& en
             //cam_->StopGrabbing();
             cam_->ChunkModeActive.SetValue(enable);
             //grabbingStarting();
+            this->chunk_mode_active_ = enable;
 
             if (enable)
                 RCLCPP_DEBUG(LOGGER_BASE, "Chunk mode active enabled");

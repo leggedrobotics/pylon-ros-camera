@@ -37,6 +37,7 @@
 #include <GenApi/IEnumEntry.h>
 #pragma GCC diagnostic pop
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -74,7 +75,9 @@ public:
 
     virtual bool startGrabbing(const PylonROS2CameraParameter& parameters) override;
 
-    virtual bool grab(std::vector<uint8_t>& image, rclcpp::Time &stamp) override;
+    virtual bool grab(std::vector<uint8_t>& image,
+                      rclcpp::Time &stamp,
+                      rclcpp::Duration* timestamp_validation_offset = nullptr) override;
 
     virtual bool grab(uint8_t* image) override;
 
@@ -503,7 +506,20 @@ protected:
     typedef typename CameraTraitT::TimerSelectorEnums TimerSelectorEnums;
     typedef typename CameraTraitT::TimerTriggerSourceEnums TimerTriggerSourceEnums;
 
+    enum class TimestampMode
+    {
+        Auto,
+        Host,
+        Camera
+    };
+
     CBaslerInstantCameraT* cam_;
+
+    TimestampMode timestamp_mode_ = TimestampMode::Auto;
+    bool camera_timestamp_uses_bsl_ = false;
+    bool camera_timestamp_midpoint_ = false;
+    double previous_chunk_exposure_us_ = std::numeric_limits<double>::quiet_NaN();
+    rclcpp::Clock timestamp_validation_clock_{RCL_SYSTEM_TIME};
 
     // Created on first compressed frame (Basler Compression Beyond).
     std::unique_ptr<Pylon::CImageDecompressor> image_decompressor_;
@@ -531,6 +547,8 @@ protected:
                                        const float& current_brightness) override;
 
     virtual bool grab(Pylon::CBaslerUniversalGrabResultPtr& grab_result);
+
+    bool configureTimestamping(const PylonROS2CameraParameter& parameters);
 
     virtual bool setupSequencer(const std::vector<float>& exposure_times,
                                 std::vector<float>& exposure_times_set);

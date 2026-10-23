@@ -37,6 +37,25 @@
     #  The maximum possible frame rate is displayed when starting the driver.
     frame_rate: 500.0
 
+    #  Image header timestamp policy:
+    #  "auto" uses an enabled timestamp chunk when available, "host" always uses
+    #  ROS time sampled after a grab, and "camera" requires a hardware timestamp
+    #  on every frame.
+    # timestamp_source: "auto"
+
+    #  On ace 2 cameras, select FrameStart, ExposureStart, ExposureMidpoint, or
+    #  ExposureEnd. ExposureMidpoint uses ExposureStart plus half of the
+    #  acquisition stream's exposure time, including Exposure Auto transitions.
+    # camera_timestamp_selector: "ExposureStart"
+
+    #  Reject required camera timestamps whose clock differs from ROS by more
+    #  than this. ExposureMidpoint is validated at exposure end.
+    # camera_timestamp_max_age_ms: 1000.0
+
+    #  Set false when a synchronization manager must prove PTP lock and then
+    #  release acquisition through the start_grabbing service.
+    # start_grabbing_immediately: true
+
     #  Mode of camera's shutter.
     #  The supported modes are "rolling", "global" and "global_reset"
     #  Default value is "" (empty) means default_shutter_mode

@@ -192,7 +192,10 @@ bool PylonROS2CameraNode::init()
   // this to avoid querying currentROSEncoding() on a 3D pixel format.
   if (!this->pylon_camera_->is3D())
   {
-    this->pylon_camera_->chunk_mode_active_ = (this->pylon_camera_->getChunkModeActive() == 1);
+    if (this->pylon_camera_parameter_set_.timestamp_source_ != "camera")
+    {
+      this->pylon_camera_->chunk_mode_active_ = (this->pylon_camera_->getChunkModeActive() == 1);
+    }
     const std::string ros_enc = this->pylon_camera_->currentROSEncoding();
     const std::string gen_api_enc = this->pylon_camera_->currentBaslerEncoding();
     this->pylon_camera_->bit_shift_active_ = encodingconversions::is_12_bit_ros_enc(ros_enc) &&
@@ -202,6 +205,18 @@ bool PylonROS2CameraNode::init()
       RCLCPP_INFO(LOGGER, "Activated chunk mode");
     if (this->pylon_camera_->bit_shift_active_)
       RCLCPP_INFO(LOGGER, "Activated bit shifting");
+  }
+
+  if (!this->pylon_camera_parameter_set_.start_grabbing_immediately_)
+  {
+    const std::string stop_result = this->pylon_camera_->grabbingStopping();
+    if (stop_result.find("done") == std::string::npos)
+    {
+      RCLCPP_ERROR_STREAM(LOGGER, "Failed to defer image acquisition for synchronization: " << stop_result);
+      return false;
+    }
+    this->grabbing_enabled_ = false;
+    RCLCPP_INFO(LOGGER, "Image acquisition is paused until the start_grabbing service releases it");
   }
 
   return true;
@@ -1181,6 +1196,12 @@ void PylonROS2CameraNode::spin()
         continue;
       }
 
+      if (!this->grabbing_enabled_)
+      {
+        wait_for_next_cycle(start_time);
+        continue;
+      }
+
       // grab
       RCLCPP_DEBUG(LOGGER, ">>> New frame grabbing <<<");
 
@@ -1383,13 +1404,45 @@ bool PylonROS2CameraNode::grabImage()
     // especially important for external trigger cameras where grab() blocks until the
     // trigger fires.
     rclcpp::Time stamp;
-    if (!this->pylon_camera_->grab(this->img_raw_msg_.data, stamp))
+    rclcpp::Duration timestamp_validation_offset = rclcpp::Duration::from_nanoseconds(0);
+    if (!this->pylon_camera_->grab(this->img_raw_msg_.data, stamp, &timestamp_validation_offset))
     {
       return false;
     }
     if (stamp.nanoseconds() == 0)
     {
+      if (this->pylon_camera_parameter_set_.timestamp_source_ == "camera")
+      {
+        RCLCPP_ERROR_THROTTLE(LOGGER, *this->get_clock(), 5000,
+            "Camera hardware timestamp is required but absent; dropping frame without host fallback");
+        return false;
+      }
       stamp = rclcpp::Node::now();
+    }
+    else if (this->pylon_camera_parameter_set_.timestamp_source_ == "camera")
+    {
+      const int64_t header_age_ns = rclcpp::Node::now().nanoseconds() - stamp.nanoseconds();
+      const int64_t age_ns = header_age_ns - timestamp_validation_offset.nanoseconds();
+      const double age_ms = static_cast<double>(age_ns) / 1.0e6;
+      const double header_age_ms = static_cast<double>(header_age_ns) / 1.0e6;
+
+      if (std::abs(age_ms) > this->pylon_camera_parameter_set_.camera_timestamp_max_age_ms_)
+      {
+        RCLCPP_ERROR_THROTTLE(LOGGER, *this->get_clock(), 5000,
+            "Camera timestamp differs from the ROS clock by %.3f ms (header age %.3f ms, "
+            "exposure offset %.3f ms, limit %.3f ms); dropping frame",
+            age_ms, header_age_ms,
+            static_cast<double>(timestamp_validation_offset.nanoseconds()) / 1.0e6,
+            this->pylon_camera_parameter_set_.camera_timestamp_max_age_ms_);
+        return false;
+      }
+
+      if (!this->camera_timestamp_validated_)
+      {
+        RCLCPP_INFO_STREAM(LOGGER, "Camera hardware timestamp validated against ROS time; first-frame header age "
+            << header_age_ms << " ms, validation age " << age_ms << " ms");
+        this->camera_timestamp_validated_ = true;
+      }
     }
     this->img_raw_msg_.header.stamp = stamp;
   }
@@ -4834,6 +4887,8 @@ void PylonROS2CameraNode::startGrabbingCallback(const std::shared_ptr<TriggerSrv
   response->message = this->grabbingStarting();
   if (response->message.find("done") != std::string::npos)
   {
+    this->camera_timestamp_validated_ = false;
+    this->grabbing_enabled_ = true;
     response->success = true;
   }
   else 
@@ -4846,6 +4901,7 @@ void PylonROS2CameraNode::stopGrabbingCallback(const std::shared_ptr<TriggerSrv:
                                                std::shared_ptr<TriggerSrv::Response> response)
 {
   (void)request;
+  const bool was_enabled = this->grabbing_enabled_.exchange(false);
   response->message = this->grabbingStopping();
   if (response->message.find("done") != std::string::npos)
   {
@@ -4853,6 +4909,7 @@ void PylonROS2CameraNode::stopGrabbingCallback(const std::shared_ptr<TriggerSrv:
   }
   else 
   {
+    this->grabbing_enabled_ = was_enabled;
     response->success = false;
   }
 }
