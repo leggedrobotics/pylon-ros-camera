@@ -36,7 +36,9 @@
 #include <pylon/ImageDecompressor.h>
 #include <GenApi/IEnumEntry.h>
 #pragma GCC diagnostic pop
+#include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <map>
@@ -468,6 +470,8 @@ protected:
     const uint8_t* rawImageData(const Pylon::CBaslerUniversalGrabResultPtr& grab_result,
                                 std::vector<uint8_t>& scratch);
 
+    void invalidateROSEncodingCache() const;
+
     typedef typename CameraTraitT::CBaslerInstantCameraT CBaslerInstantCameraT;
     typedef typename CameraTraitT::ExposureAutoEnums ExposureAutoEnums;
     typedef typename CameraTraitT::GainAutoEnums GainAutoEnums;
@@ -505,6 +509,11 @@ protected:
     std::unique_ptr<Pylon::CImageDecompressor> image_decompressor_;
     std::vector<uint8_t> decompress_scratch_;
     mutable int trigger_mode_cache_ = -99;
+    // PixelFormat changes only through setImageEncoding(); the generation is
+    // bumped there so a getter that read the device before cannot publish.
+    mutable std::mutex ros_encoding_cache_mutex_;
+    mutable std::string current_ros_encoding_cache_;
+    mutable std::uint64_t ros_encoding_generation_ = 0;
 
     // Each camera has it's own getter for GenApi accessors that are named
     // differently for USB and GigE

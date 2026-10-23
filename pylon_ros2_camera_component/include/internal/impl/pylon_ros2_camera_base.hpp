@@ -191,6 +191,16 @@ size_t PylonROS2CameraImpl<CameraTraitT>::currentBinningY()
 template <typename CameraTraitT>
 std::string PylonROS2CameraImpl<CameraTraitT>::currentROSEncoding() const
 {
+    std::uint64_t generation_at_read;
+    {
+        std::lock_guard<std::mutex> lock(ros_encoding_cache_mutex_);
+        if (!current_ros_encoding_cache_.empty())
+        {
+            return current_ros_encoding_cache_;
+        }
+        generation_at_read = ros_encoding_generation_;
+    }
+
     RCLCPP_INFO_STREAM_ONCE(LOGGER_BASE, "Camera's currently set pixel format is " << this->currentBaslerEncoding());
 
     std::string gen_api_encoding(cam_->PixelFormat.ToString().c_str());
@@ -209,7 +219,24 @@ std::string PylonROS2CameraImpl<CameraTraitT>::currentROSEncoding() const
         //return "NO_ENCODING";
     }
 
+    if (!ros_encoding.empty())
+    {
+        std::lock_guard<std::mutex> lock(ros_encoding_cache_mutex_);
+        if (ros_encoding_generation_ == generation_at_read)
+        {
+            current_ros_encoding_cache_ = ros_encoding;
+        }
+    }
+
     return ros_encoding;
+}
+
+template <typename CameraTraitT>
+void PylonROS2CameraImpl<CameraTraitT>::invalidateROSEncodingCache() const
+{
+    std::lock_guard<std::mutex> lock(ros_encoding_cache_mutex_);
+    current_ros_encoding_cache_.clear();
+    ++ros_encoding_generation_;
 }
 
 template <typename CameraTraitT>
@@ -645,9 +672,7 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(uint8_t* image)
     // Bit shifting
     // ------------------------------------------------------------------------
     // In case of 12 bits we need to shift the image bits 4 positions to the left
-    std::string ros_enc = currentROSEncoding();
-
-    if (encodingconversions::is_12_bit_ros_enc(ros_enc))
+    if (this->bit_shift_active_)
     {
         const uint8_t *pImageBuffer = rawImageData(ptr_grab_result, decompress_scratch_);
         if (pImageBuffer == nullptr)
@@ -984,6 +1009,14 @@ std::string PylonROS2CameraImpl<CameraTraitT>::setImageEncoding(const std::strin
             grabbingStarting();
             cam_->StopGrabbing();
             GenApi::CEnumerationPtr(node_map.GetNode("PixelFormat"))->FromString(gen_api_encoding.c_str());
+            std::string current_ros_encoding;
+            {
+                std::lock_guard<std::mutex> lock(ros_encoding_cache_mutex_);
+                current_ros_encoding_cache_ =
+                    encodingconversions::genAPI2Ros(gen_api_encoding, current_ros_encoding)
+                    ? current_ros_encoding : std::string();
+                ++ros_encoding_generation_;
+            }
             return "done";
         }
         else
@@ -3225,6 +3258,7 @@ std::string PylonROS2CameraImpl<CameraTraitT>::loadUserSet()
         grabbingStopping();
         cam_->UserSetLoad.Execute();
         trigger_mode_cache_ = -99;
+        invalidateROSEncodingCache();
         grabbingStarting();
     }
     catch ( const GenICam::GenericException &e )
@@ -3285,6 +3319,8 @@ std::string PylonROS2CameraImpl<CameraTraitT>::loadPfs(const std::string& fileNa
         Pylon::String_t fileNameCStr = fileName.c_str();
         RCLCPP_INFO_STREAM(LOGGER_BASE, "Loading the pfs file: " << fileNameCStr );
         Pylon::CFeaturePersistence::Load(fileNameCStr, &cam_->GetNodeMap(), true);
+        trigger_mode_cache_ = -99;
+        invalidateROSEncodingCache();
         grabbingStarting();
     }
     catch ( const GenICam::GenericException &e )
