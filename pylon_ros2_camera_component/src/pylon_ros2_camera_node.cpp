@@ -29,6 +29,7 @@
 #include <GenApi/GenApi.h>
 
 #include <rclcpp/logger.hpp>
+#include <rmw/qos_profiles.h>
 #include <signal.h>
 #include <pthread.h>
 #include <chrono>
@@ -223,7 +224,9 @@ void PylonROS2CameraNode::initPublishers()
   this->component_status_pub_ = this->create_publisher<pylon_ros2_camera_interfaces::msg::ComponentStatus>(msg_name, 5);
 
   msg_name = msg_prefix + "image_raw";
-  this->img_raw_pub_ = image_transport::create_camera_publisher(this, msg_name);
+  // Reliable delivery can block the grab loop behind a slow subscriber until
+  // every Pylon buffer is used and GigE frames arrive incomplete.
+  this->img_raw_pub_ = image_transport::create_camera_publisher(this, msg_name, rmw_qos_profile_sensor_data);
 
   // 3D related topics
   // Note: ROS 2 topic name tokens must not start with a digit, so the 3D
@@ -428,6 +431,9 @@ void PylonROS2CameraNode::initServices()
 
   srv_name = srv_prefix + "set_ptp_priority";
   this->set_ptp_priority_srv_ = this->create_service<SetIntegerSrv>(srv_name, std::bind(&PylonROS2CameraNode::setPTPPriorityCallback, this, _1, _2));
+
+  srv_name = srv_prefix + "set_ptp_servo_locked_threshold";
+  this->set_ptp_servo_locked_threshold_srv_ = this->create_service<SetIntegerSrv>(srv_name, std::bind(&PylonROS2CameraNode::setPTPServoLockedThresholdCallback, this, _1, _2));
   
   srv_name = srv_prefix + "set_ptp_profile";
   this->set_ptp_profile_srv_ = this->create_service<SetIntegerSrv>(srv_name, std::bind(&PylonROS2CameraNode::setPTPProfileCallback, this, _1, _2));
@@ -3554,6 +3560,8 @@ void PylonROS2CameraNode::setOutputQueueSizeCallback(const std::shared_ptr<SetIn
 void PylonROS2CameraNode::setMaxNumBufferCallback(const std::shared_ptr<SetIntegerSrv::Request> request,
                                                   std::shared_ptr<SetIntegerSrv::Response> response)
 {
+  // Restarts the stream grabber; serialize with the acquisition thread.
+  std::lock_guard<std::recursive_mutex> lock(this->grab_mutex_);
   response->message = this->pylon_camera_->setMaxNumBuffer(request->value);
 
   if (response->message.find("done") != std::string::npos)
@@ -3608,6 +3616,13 @@ void PylonROS2CameraNode::setTimerTriggerSourceCallback(const std::shared_ptr<Se
   {
     response->success = false;
   }
+}
+
+void PylonROS2CameraNode::setPTPServoLockedThresholdCallback(const std::shared_ptr<SetIntegerSrv::Request> request,
+                                                             std::shared_ptr<SetIntegerSrv::Response> response)
+{
+  response->message = this->pylon_camera_->setPTPServoLockedThreshold(request->value);
+  response->success = response->message.find("done") != std::string::npos;
 }
 
 void PylonROS2CameraNode::setPTPPriorityCallback(const std::shared_ptr<SetIntegerSrv::Request> request,

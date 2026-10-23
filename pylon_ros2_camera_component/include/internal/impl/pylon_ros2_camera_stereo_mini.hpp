@@ -393,6 +393,7 @@ public:
 
     // PTP / IEEE 1588 services - no PTP nodes.
     virtual std::string setPTPPriority(const int& value) override;
+    virtual std::string setPTPServoLockedThreshold(const int& value) override;
     virtual std::string setPTPProfile(const int& value) override;
     virtual std::string setPTPNetworkMode(const int& value) override;
     virtual std::string setPTPUCPortAddressIndex(const int& value) override;
@@ -2110,6 +2111,11 @@ std::string PylonROS2StereoMiniCamera::setMaxTransferSize(const int& /*maxTransf
 }
 
 std::string PylonROS2StereoMiniCamera::setPTPPriority(const int& /*value*/)
+{
+    return "Feature not available for this camera type";
+}
+
+std::string PylonROS2StereoMiniCamera::setPTPServoLockedThreshold(const int& /*value*/)
 {
     return "Feature not available for this camera type";
 }

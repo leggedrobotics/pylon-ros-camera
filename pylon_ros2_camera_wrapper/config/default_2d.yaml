@@ -133,6 +133,15 @@
     #  start of image data transmissions from each camera.
     #  frame_transmission_delay: 0
 
+    #  Maximum time in milliseconds to complete a GigE frame, including packet
+    #  resends. Increase this when short receive-side scheduling stalls cause
+    #  incomplete buffers. Only used for GigE cameras.
+    # frame_retention: 100
+
+    #  Pylon GigE receive socket size in bytes. The system rmem_max must permit
+    #  this value. Zero leaves the Pylon transport default unchanged.
+    # socket_buffer_size: 0
+
     #  Timeout in milliseconds passed to RetrieveResult(). Limits how long the driver waits
     #  for image data to arrive after a grab is initiated.
     #  - Free-run mode: must be greater than the inter-frame period

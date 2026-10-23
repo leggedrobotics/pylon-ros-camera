@@ -67,6 +67,8 @@ PylonROS2CameraParameter::PylonROS2CameraParameter() :
     stereo_ace_illumination_mode_("AlwaysActive"),
     inter_pkg_delay_(0),
     frame_transmission_delay_(0),
+    frame_retention_(100),
+    socket_buffer_size_(0),
     shutter_mode_(SM_DEFAULT),
     auto_flash_(false),
     auto_flash_line_2_(true),
@@ -448,6 +450,26 @@ void PylonROS2CameraParameter::readFromRosParameterServer(rclcpp::Node& nh)
     }
     
     nh.get_parameter("frame_transmission_delay", this->frame_transmission_delay_);
+
+    // frame_retention
+    RCLCPP_DEBUG(LOGGER, "---> frame_retention");
+
+    if (!nh.has_parameter("frame_retention"))
+    {
+        nh.declare_parameter<int>("frame_retention", 100);
+    }
+
+    nh.get_parameter("frame_retention", this->frame_retention_);
+
+    // socket_buffer_size
+    RCLCPP_DEBUG(LOGGER, "---> socket_buffer_size");
+
+    if (!nh.has_parameter("socket_buffer_size"))
+    {
+        nh.declare_parameter<int>("socket_buffer_size", 0);
+    }
+
+    nh.get_parameter("socket_buffer_size", this->socket_buffer_size_);
 
     // shutter mode
     RCLCPP_DEBUG(LOGGER, "---> shutter_mode");

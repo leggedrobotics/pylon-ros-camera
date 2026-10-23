@@ -1073,6 +1073,12 @@ public:
     virtual std::string setPTPPriority(const int& value) = 0;
 
     /**
+     * Sets the PTP servo locked threshold in nanoseconds - Applies to: ace 2 GigE.
+     * @return error message if an error occurred or done message otherwise.
+     */
+    virtual std::string setPTPServoLockedThreshold(const int& value) = 0;
+
+    /**
      * Sets the PTP profile - Applies to: ace 2 GigE.
      * @return error message if an error occurred or done message otherwise.
      */
