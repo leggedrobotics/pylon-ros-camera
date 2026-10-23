@@ -113,6 +113,11 @@ PylonROS2CameraNode::PylonROS2CameraNode(const rclcpp::NodeOptions& options)
 PylonROS2CameraNode::~PylonROS2CameraNode()
 {
   this->stop_spinning_ = true;
+  if (this->pylon_camera_ != nullptr)
+  {
+    // Also covers component unloading without a preceding rclcpp shutdown.
+    this->pylon_camera_->grabbingStopping();
+  }
   if (this->spin_thread_.joinable())
   {
     this->spin_thread_.join();
@@ -1117,16 +1122,29 @@ void PylonROS2CameraNode::spin()
 
   double frame_step = 1.0 / this->frameRate();
 
+  // An active stream is paced by RetrieveResult(). Only wait out the frame
+  // period when no frame was acquired, so the loop never sleeps past a frame.
+  auto wait_for_next_cycle = [frame_step](double start_time)
+  {
+    const double sleep_time = frame_step - (rclcpp::Clock().now().seconds() - start_time);
+    if (sleep_time > 0)
+    {
+      std::this_thread::sleep_for(std::chrono::duration<double>(sleep_time));
+    }
+  };
+
   while (!this->stop_spinning_ && rclcpp::ok())
   {
+    double start_time = 0.0;
     // Wrap the whole iteration in try/catch: if rclcpp::shutdown() races
     // with any rclcpp API call in the body (Clock, publish,
     // count_subscribers, ...) after the context is invalidated, the
     // resulting std::runtime_error is caught here and we exit cleanly.
     try
     {
-      double start_time = rclcpp::Clock().now().seconds();
+      start_time = rclcpp::Clock().now().seconds();
       double tdiff; // used to compute time difference during the grabbing process
+      bool acquired_frame = false;
 
       // check if the camera is disconnected
       // the call time cost to isCamRemoved() is unsignificant with respect to the grabbing frame rate
@@ -1177,8 +1195,10 @@ void PylonROS2CameraNode::spin()
         {
           if (!this->grabImage())
           {
+            wait_for_next_cycle(start_time);
             continue;
           }
+          acquired_frame = true;
         }
 
         // compute grab time
@@ -1251,8 +1271,10 @@ void PylonROS2CameraNode::spin()
 
           if (!this->grabImage())
           {
+            wait_for_next_cycle(start_time);
             continue;
           }
+          acquired_frame = true;
 
           // compute grab time
           double grab_time = rclcpp::Clock().now().seconds();
@@ -1327,25 +1349,21 @@ void PylonROS2CameraNode::spin()
       double loop_frame_rate = 1.0 / tdiff;
       RCLCPP_DEBUG_STREAM(LOGGER, "Actual spinning frame rate: " << loop_frame_rate);
 
-      // the user has set a frame rate - wait accordingly to respect it
-      if (tdiff > 0)  // just in case of but should never happen
+      if (!acquired_frame)
       {
-        double sleep_time = frame_step - tdiff;
-        std::this_thread::sleep_for(std::chrono::duration<double>(sleep_time));
+        wait_for_next_cycle(start_time);
       }
-
-      // compute actual frame rate, just to check
-      double check_loop_it_time = rclcpp::Clock().now().seconds();
-      tdiff = check_loop_it_time - start_time;
-      double check_frame_rate = 1.0 / tdiff;
-      RCLCPP_DEBUG_STREAM(LOGGER, "Spinning frame rate (to check): " << check_frame_rate);
     } // end try
     catch (const std::exception& e)
     {
-      // An rclcpp API was called after context invalidation during shutdown.
-      // Exit the loop cleanly instead of propagating the exception.
-      (void)e;
-      break;
+      // During shutdown an rclcpp API may be called after context
+      // invalidation: exit cleanly. Anything else must not end acquisition.
+      if (!rclcpp::ok() || this->stop_spinning_)
+      {
+        break;
+      }
+      RCLCPP_ERROR_STREAM(LOGGER, "Acquisition loop exception: " << e.what());
+      wait_for_next_cycle(start_time);
     }
   }
 }
