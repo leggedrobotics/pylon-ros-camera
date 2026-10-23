@@ -186,6 +186,8 @@ bool PylonROS2CameraNode::init()
     return false;
   }
 
+  this->initCameraTypePublishers();
+
   // cache flags to avoid per-frame string comparisons in the grab path
   // These only concern the 2D grab path (chunk timestamps and 12-bit Bayer
   // shifting). 3D cameras use grab3D() and have no 2D ROS encoding, so skip
@@ -248,33 +250,58 @@ void PylonROS2CameraNode::initPublishers()
   // every Pylon buffer is used and GigE frames arrive incomplete.
   this->img_raw_pub_ = image_transport::create_camera_publisher(this, msg_name, rmw_qos_profile_sensor_data);
 
-  // 3D related topics
   // Note: ROS 2 topic name tokens must not start with a digit, so the 3D
   // topics use a trailing "_3d" suffix (e.g. cloud_3d) rather than a "3d_"
-  // prefix.
-  msg_name = msg_prefix + "cloud_3d"; this->cloud_3d_topic_name_ = msg_name;
-  this->cloud_3d_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(msg_name, 10);
-  msg_name = msg_prefix + "intensity_3d"; this->intensity_3d_topic_name_ = msg_name;
-  this->intensity_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(msg_name, 10);
-  msg_name = msg_prefix + "depth_map_3d"; this->depth_map_3d_topic_name_ = msg_name;
-  this->depth_map_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(msg_name, 10);
-  msg_name = msg_prefix + "depth_map_color_3d"; this->depth_map_color_3d_topic_name_ = msg_name;
-  this->depth_map_color_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(msg_name, 10);
-  msg_name = msg_prefix + "confidence_3d"; this->confidence_3d_topic_name_ = msg_name;
-  this->confidence_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(msg_name, 10);
-  msg_name = msg_prefix + "camera_info_3d";
-  this->cam_info_3d_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>(msg_name, 10);
-  // Extra intensity topics (e.g. Stereo mini left/right IR). Publishers are
-  // created unconditionally; they will simply have no subscribers for cameras
-  // that don't provide extra intensity images.
-  msg_name = msg_prefix + "intensity_left_3d"; this->intensity_left_3d_topic_name_ = msg_name;
-  this->intensity_left_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(msg_name, 10);
-  msg_name = msg_prefix + "intensity_right_3d"; this->intensity_right_3d_topic_name_ = msg_name;
-  this->intensity_right_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(msg_name, 10);
-  // IMU topic (e.g. Stereo mini). Created unconditionally; it only publishes
-  // when the camera has an enabled IMU.
-  msg_name = msg_prefix + "imu"; this->imu_topic_name_ = msg_name;
-  this->imu_pub_ = this->create_publisher<sensor_msgs::msg::Imu>(msg_name, 100);
+  // prefix. The publishers are created in initCameraTypePublishers().
+  this->cloud_3d_topic_name_ = msg_prefix + "cloud_3d";
+  this->intensity_3d_topic_name_ = msg_prefix + "intensity_3d";
+  this->depth_map_3d_topic_name_ = msg_prefix + "depth_map_3d";
+  this->depth_map_color_3d_topic_name_ = msg_prefix + "depth_map_color_3d";
+  this->confidence_3d_topic_name_ = msg_prefix + "confidence_3d";
+  this->intensity_left_3d_topic_name_ = msg_prefix + "intensity_left_3d";
+  this->intensity_right_3d_topic_name_ = msg_prefix + "intensity_right_3d";
+  this->imu_topic_name_ = msg_prefix + "imu";
+}
+
+void PylonROS2CameraNode::initCameraTypePublishers()
+{
+  // init() also runs on reconnect, where the device may be a different type.
+  if (this->pylon_camera_->is3D())
+  {
+    if (!this->cloud_3d_pub_)
+    {
+      this->cloud_3d_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>(this->cloud_3d_topic_name_, 10);
+      this->intensity_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(this->intensity_3d_topic_name_, 10);
+      this->depth_map_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(this->depth_map_3d_topic_name_, 10);
+      this->depth_map_color_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(this->depth_map_color_3d_topic_name_, 10);
+      this->confidence_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(this->confidence_3d_topic_name_, 10);
+      this->cam_info_3d_pub_ = this->create_publisher<sensor_msgs::msg::CameraInfo>("~/camera_info_3d", 10);
+    }
+    if (this->pylon_camera_->hasExtraIntensityImages() && !this->intensity_left_3d_pub_)
+    {
+      this->intensity_left_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(this->intensity_left_3d_topic_name_, 10);
+      this->intensity_right_3d_pub_ = this->create_publisher<sensor_msgs::msg::Image>(this->intensity_right_3d_topic_name_, 10);
+    }
+  }
+  else
+  {
+    this->cloud_3d_pub_.reset();
+    this->intensity_3d_pub_.reset();
+    this->depth_map_3d_pub_.reset();
+    this->depth_map_color_3d_pub_.reset();
+    this->confidence_3d_pub_.reset();
+    this->cam_info_3d_pub_.reset();
+  }
+  if (!this->pylon_camera_->hasExtraIntensityImages())
+  {
+    this->intensity_left_3d_pub_.reset();
+    this->intensity_right_3d_pub_.reset();
+  }
+  // Kept once created: the IMU thread publishes on it without a lock.
+  if (this->pylon_camera_->hasIMU() && !this->imu_pub_)
+  {
+    this->imu_pub_ = this->create_publisher<sensor_msgs::msg::Imu>(this->imu_topic_name_, 100);
+  }
 }
 
 void PylonROS2CameraNode::initServices()

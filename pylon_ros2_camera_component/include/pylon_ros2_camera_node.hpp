@@ -170,6 +170,11 @@ protected:
    * @brief initialize the node publishers
    */
   void initPublishers();
+
+  /**
+   * @brief create or drop the 3D and IMU publishers to match the opened camera
+   */
+  void initCameraTypePublishers();
   
   /**
    * @brief initialize the node services
