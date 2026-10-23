@@ -946,10 +946,15 @@ bool PylonROS2CameraNode::startGrabbing()
       if (this->camera_info_manager_->loadCameraInfo(this->pylon_camera_parameter_set_.cameraInfoURL()))
       {
         this->setupRectification();
-        // set the correct tf frame_id and current ROI from camera
+        // Set the correct tf frame_id. A calibration of the acquired image size
+        // is already in its pixel coordinates, so its ROI stays authoritative;
+        // the hardware ROI only applies to a full-sensor calibration.
         sensor_msgs::msg::CameraInfo cam_info = this->camera_info_manager_->getCameraInfo();
         cam_info.header.frame_id = this->img_raw_msg_.header.frame_id;
-        if (this->pylon_camera_->isROIActive())
+        const bool calibration_matches_acquired_image =
+          cam_info.width == this->img_raw_msg_.width &&
+          cam_info.height == this->img_raw_msg_.height;
+        if (this->pylon_camera_->isROIActive() && !calibration_matches_acquired_image)
         {
           cam_info.roi = this->pylon_camera_->currentROI();
         }
