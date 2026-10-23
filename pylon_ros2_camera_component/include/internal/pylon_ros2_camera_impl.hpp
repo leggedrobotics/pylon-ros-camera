@@ -474,6 +474,11 @@ protected:
                                 std::vector<uint8_t>& scratch);
 
     void invalidateROSEncodingCache() const;
+    Pylon::CBaslerUniversalGrabResultPtr getCachedGrabResult() const;
+
+    // AutoTargetValue and AutoTargetBrightness use different scales; the GigE
+    // trait covers both, so detect the node at runtime.
+    double convertBrightness(const int& value);
 
     typedef typename CameraTraitT::CBaslerInstantCameraT CBaslerInstantCameraT;
     typedef typename CameraTraitT::ExposureAutoEnums ExposureAutoEnums;
@@ -530,6 +535,8 @@ protected:
     mutable std::mutex ros_encoding_cache_mutex_;
     mutable std::string current_ros_encoding_cache_;
     mutable std::uint64_t ros_encoding_generation_ = 0;
+    mutable std::mutex cached_grab_result_mutex_;
+    Pylon::CGrabResultPtr cached_grab_result_;
 
     // Each camera has it's own getter for GenApi accessors that are named
     // differently for USB and GigE

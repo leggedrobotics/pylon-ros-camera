@@ -231,6 +231,13 @@ std::string PylonROS2CameraImpl<CameraTraitT>::currentROSEncoding() const
     return ros_encoding;
 }
 
+template <typename CameraTrait>
+Pylon::CBaslerUniversalGrabResultPtr PylonROS2CameraImpl<CameraTrait>::getCachedGrabResult() const
+{
+    std::lock_guard<std::mutex> lock(cached_grab_result_mutex_);
+    return Pylon::CBaslerUniversalGrabResultPtr(cached_grab_result_);
+}
+
 template <typename CameraTraitT>
 void PylonROS2CameraImpl<CameraTraitT>::invalidateROSEncodingCache() const
 {
@@ -998,6 +1005,11 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(Pylon::CBaslerUniversalGrabResultPtr
         return false;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(cached_grab_result_mutex_);
+        cached_grab_result_ = static_cast<Pylon::CGrabResultPtr>(grab_result);
+    }
+
     return true;
 }
 
@@ -1575,6 +1587,17 @@ bool PylonROS2CameraImpl<CameraTraitT>::setGain(const float& target_gain,
 }
 
 template <typename CameraTraitT>
+double PylonROS2CameraImpl<CameraTraitT>::convertBrightness(const int& value)
+{
+    // AutoTargetValue (older GigE) is 0-255; AutoTargetBrightness (USB, ace 2) is 0.0-1.0.
+    if (!GenApi::IsAvailable(cam_->AutoTargetValue) && GenApi::IsAvailable(cam_->AutoTargetBrightness))
+    {
+        return value / 255.0;
+    }
+    return value;
+}
+
+template <typename CameraTraitT>
 bool PylonROS2CameraImpl<CameraTraitT>::setBrightness(const int& target_brightness,
                                                   const float& current_brightness,
                                                   const bool& exposure_auto,
@@ -1585,8 +1608,7 @@ bool PylonROS2CameraImpl<CameraTraitT>::setBrightness(const int& target_brightne
         // if the target brightness is greater 255, limit it to 255
         // the brightness_to_set is a float value, regardless of the current
         // pixel data output format, i.e., 0.0 -> black, 1.0 -> white.
-        typename CameraTraitT::AutoTargetBrightnessValueType brightness_to_set =
-            CameraTraitT::convertBrightness(std::min(255, target_brightness));
+        const double brightness_to_set = convertBrightness(std::min(255, target_brightness));
 /**
 #if DEBUG
         std::cout << "br = " << current_brightness << ", gain = "
@@ -1718,7 +1740,7 @@ bool PylonROS2CameraImpl<CameraTraitT>::setBrightness(const int& target_brightne
     {
         RCLCPP_ERROR_STREAM(LOGGER_BASE, "An generic exception while setting target brightness to "
                 << target_brightness << " (= "
-                << CameraTraitT::convertBrightness(std::min(255, target_brightness))
+                << convertBrightness(std::min(255, target_brightness))
                 <<  ") occurred: " << e.GetDescription());
         return false;
     }
@@ -1749,8 +1771,7 @@ bool PylonROS2CameraImpl<CameraTraitT>::setExtendedBrightness(const int& target_
         return false;
     }
 
-    typename CameraTraitT::AutoTargetBrightnessValueType brightness_to_set =
-        CameraTraitT::convertBrightness(target_brightness);
+    const double brightness_to_set = convertBrightness(target_brightness);
 
     if ( !binary_exp_search_ )
     {
@@ -3717,6 +3738,10 @@ std::string PylonROS2CameraImpl<CameraTraitT>::grabbingStopping()
     try
     {
         cam_->StopGrabbing();
+        {
+            std::lock_guard<std::mutex> lock(cached_grab_result_mutex_);
+            cached_grab_result_.Release();
+        }
         RCLCPP_DEBUG(LOGGER_BASE, "Grabbing stopped");
         return "done";
     }
@@ -4430,20 +4455,10 @@ int64_t PylonROS2CameraImpl<CameraTraitT>::getChunkTimestamp()
         return -3;  // not grabbing
     }
 
-    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result;
-    try
-    {
-        cam_->TriggerSoftware.Execute();
-        cam_->RetrieveResult(5000, ptr_grab_result, Pylon::TimeoutHandling_ThrowException);
-        //std::cout << "GrabSucceeded: " << ptr_grab_result->GrabSucceeded() << std::endl;
-    }
-    catch (const GenICam::GenericException &e)
-    {
-        RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while trying to grab prior to chunk timestamp access: " << e.GetDescription());
-        return -3;  // exception
-    }
-
-    if (!ptr_grab_result->GrabSucceeded())
+    // The acquisition thread owns RetrieveResult(); read the chunks of its
+    // latest frame instead of grabbing (and dropping) another one.
+    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result = getCachedGrabResult();
+    if (!ptr_grab_result.IsValid() && !this->grab(ptr_grab_result))
     {
         RCLCPP_WARN(LOGGER_BASE, "Grab was not successful prior to chunk timestamp access");
         return -3;  // did not manage to grab
@@ -4484,20 +4499,10 @@ float PylonROS2CameraImpl<CameraTraitT>::getChunkExposureTime()
         return -3.0;  // not grabbing
     }
 
-    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result;
-    try
-    {
-        cam_->TriggerSoftware.Execute();
-        cam_->RetrieveResult(5000, ptr_grab_result, Pylon::TimeoutHandling_ThrowException);
-        //std::cout << "GrabSucceeded: " << ptr_grab_result->GrabSucceeded() << std::endl;
-    }
-    catch (const GenICam::GenericException &e)
-    {
-        RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while trying to grab prior to chunk exposure access: " << e.GetDescription());
-        return -3.0;  // exception
-    }
-
-    if (!ptr_grab_result->GrabSucceeded())
+    // The acquisition thread owns RetrieveResult(); read the chunks of its
+    // latest frame instead of grabbing (and dropping) another one.
+    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result = getCachedGrabResult();
+    if (!ptr_grab_result.IsValid() && !this->grab(ptr_grab_result))
     {
         RCLCPP_WARN(LOGGER_BASE, "Grab was not successful prior to chunk exposure access");
         return -3.0;  // did not manage to grab
@@ -4556,20 +4561,10 @@ int64_t PylonROS2CameraImpl<CameraTraitT>::getChunkLineStatusAll()
         return -3;  // not grabbing
     }
 
-    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result;
-    try
-    {
-        cam_->TriggerSoftware.Execute();
-        cam_->RetrieveResult(5000, ptr_grab_result, Pylon::TimeoutHandling_ThrowException);
-        //std::cout << "GrabSucceeded: " << ptr_grab_result->GrabSucceeded() << std::endl;
-    }
-    catch (const GenICam::GenericException &e)
-    {
-        RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while trying to grab prior to chunk line status all access: " << e.GetDescription());
-        return -3;  // exception
-    }
-
-    if (!ptr_grab_result->GrabSucceeded())
+    // The acquisition thread owns RetrieveResult(); read the chunks of its
+    // latest frame instead of grabbing (and dropping) another one.
+    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result = getCachedGrabResult();
+    if (!ptr_grab_result.IsValid() && !this->grab(ptr_grab_result))
     {
         RCLCPP_WARN(LOGGER_BASE, "Grab was not successful prior to chunk line status all access");
         return -3;  // did not manage to grab
@@ -4610,20 +4605,10 @@ int64_t PylonROS2CameraImpl<CameraTraitT>::getChunkFramecounter()
         return -3;  // not grabbing
     }
 
-    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result;
-    try
-    {
-        cam_->TriggerSoftware.Execute();
-        cam_->RetrieveResult(5000, ptr_grab_result, Pylon::TimeoutHandling_ThrowException);
-        //std::cout << "GrabSucceeded: " << ptr_grab_result->GrabSucceeded() << std::endl;
-    }
-    catch (const GenICam::GenericException &e)
-    {
-        RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while trying to grab prior to chunk frame counter access: " << e.GetDescription());
-        return -3;  // exception
-    }
-
-    if (!ptr_grab_result->GrabSucceeded())
+    // The acquisition thread owns RetrieveResult(); read the chunks of its
+    // latest frame instead of grabbing (and dropping) another one.
+    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result = getCachedGrabResult();
+    if (!ptr_grab_result.IsValid() && !this->grab(ptr_grab_result))
     {
         RCLCPP_WARN(LOGGER_BASE, "Grab was not successful prior to chunk frame counter access");
         return -3;  // did not manage to grab
@@ -4664,20 +4649,10 @@ int64_t PylonROS2CameraImpl<CameraTraitT>::getChunkCounterValue()
         return -3;  // not grabbing
     }
 
-    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result;
-    try
-    {
-        cam_->TriggerSoftware.Execute();
-        cam_->RetrieveResult(5000, ptr_grab_result, Pylon::TimeoutHandling_ThrowException);
-        //std::cout << "GrabSucceeded: " << ptr_grab_result->GrabSucceeded() << std::endl;
-    }
-    catch (const GenICam::GenericException &e)
-    {
-        RCLCPP_ERROR_STREAM(LOGGER_BASE, "An exception while trying to grab prior to chunk counter value access: " << e.GetDescription());
-        return -3;  // exception
-    }
-
-    if (!ptr_grab_result->GrabSucceeded())
+    // The acquisition thread owns RetrieveResult(); read the chunks of its
+    // latest frame instead of grabbing (and dropping) another one.
+    Pylon::CBaslerUniversalGrabResultPtr ptr_grab_result = getCachedGrabResult();
+    if (!ptr_grab_result.IsValid() && !this->grab(ptr_grab_result))
     {
         RCLCPP_WARN(LOGGER_BASE, "Grab was not successful prior to chunk counter value access");
         return -3;  // did not manage to grab
