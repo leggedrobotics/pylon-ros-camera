@@ -770,7 +770,15 @@ bool PylonROS2CameraNode::initAndRegister()
     return false;
   }
 
-  if (!this->pylon_camera_->registerCameraConfiguration())
+  // CSoftwareTriggerConfiguration re-enables the FrameStart software trigger on
+  // every StartGrabbing(), overriding whatever profile the camera holds. With
+  // "CurrentSetting" keep pylon's default free-run configuration instead.
+  if (this->pylon_camera_parameter_set_.startup_user_set_ == "CurrentSetting" &&
+      !this->pylon_camera_->is3D())
+  {
+    RCLCPP_INFO(LOGGER, "startup_user_set is 'CurrentSetting': not forcing the software trigger, camera runs free if its trigger is off");
+  }
+  else if (!this->pylon_camera_->registerCameraConfiguration())
   {
     RCLCPP_ERROR_STREAM(LOGGER, "Error while registering the camera configuration to software-trigger mode!");
     this->cm_status_.status_id = pylon_ros2_camera_interfaces::msg::ComponentStatus::ERROR;

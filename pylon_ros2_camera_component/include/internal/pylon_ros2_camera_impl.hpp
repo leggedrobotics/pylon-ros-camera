@@ -33,8 +33,10 @@
 #pragma GCC diagnostic ignored "-Wliteral-suffix"
 #include <pylon/BaslerUniversalGrabResultPtr.h>
 #include <pylon/PylonIncludes.h>
+#include <pylon/ImageDecompressor.h>
 #include <GenApi/IEnumEntry.h>
 #pragma GCC diagnostic pop
+#include <memory>
 #include <string>
 #include <vector>
 #include <map>
@@ -456,6 +458,14 @@ public:
 
 protected:
 
+    /**
+     * Host-side decompression for Basler Compression Beyond payloads.
+     */
+    bool decompressGrabResult(const Pylon::CBaslerUniversalGrabResultPtr& grab_result,
+                              uint8_t* dest, size_t dest_size);
+    const uint8_t* rawImageData(const Pylon::CBaslerUniversalGrabResultPtr& grab_result,
+                                std::vector<uint8_t>& scratch);
+
     typedef typename CameraTraitT::CBaslerInstantCameraT CBaslerInstantCameraT;
     typedef typename CameraTraitT::ExposureAutoEnums ExposureAutoEnums;
     typedef typename CameraTraitT::GainAutoEnums GainAutoEnums;
@@ -488,6 +498,11 @@ protected:
     typedef typename CameraTraitT::TimerTriggerSourceEnums TimerTriggerSourceEnums;
 
     CBaslerInstantCameraT* cam_;
+
+    // Created on first compressed frame (Basler Compression Beyond).
+    std::unique_ptr<Pylon::CImageDecompressor> image_decompressor_;
+    std::vector<uint8_t> decompress_scratch_;
+    mutable int trigger_mode_cache_ = -99;
 
     // Each camera has it's own getter for GenApi accessors that are named
     // differently for USB and GigE

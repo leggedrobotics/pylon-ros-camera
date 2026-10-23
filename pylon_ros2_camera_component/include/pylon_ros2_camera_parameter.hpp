@@ -263,6 +263,16 @@ public:
     std::string startup_user_set_;
 
     /**
+     * Basler Compression Beyond: "Off" or "BaslerCompressionBeyond", the rate
+     * option ("Lossless", "FixRatio") and the max transferred size as a
+     * percentage of the raw image. Re-applied after encoding setup because
+     * changing PixelFormat resets it.
+     */
+    std::string image_compression_mode_;
+    std::string image_compression_rate_option_;
+    double image_compression_ratio_;
+
+    /**
      * Illumination mode for the Basler Stereo ace camera.
      * Controls whether the IR projector runs during acquisition:
      *   AlwaysActive (default)    - projector always on; recommended by Basler for

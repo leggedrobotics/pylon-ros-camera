@@ -392,6 +392,36 @@ bool PylonROS2CameraImpl<CameraTraitT>::startGrabbing(const PylonROS2CameraParam
             }
         }
 
+        // Changing PixelFormat resets ImageCompressionMode on ace2 cameras,
+        // so (re-)apply the compression setup after the encoding is final.
+        if (!parameters.image_compression_mode_.empty() && parameters.image_compression_mode_ != "Off")
+        {
+            try
+            {
+                GenApi::CEnumerationPtr comp_mode = cam_->GetNodeMap().GetNode("ImageCompressionMode");
+                comp_mode->FromString(parameters.image_compression_mode_.c_str());
+                if (!parameters.image_compression_rate_option_.empty())
+                {
+                    GenApi::CEnumerationPtr rate_option = cam_->GetNodeMap().GetNode("ImageCompressionRateOption");
+                    if (rate_option.IsValid() && GenApi::IsWritable(rate_option))
+                    {
+                        rate_option->FromString(parameters.image_compression_rate_option_.c_str());
+                    }
+                }
+                GenApi::CFloatPtr comp_ratio = cam_->GetNodeMap().GetNode("BslImageCompressionRatio");
+                if (comp_ratio.IsValid() && GenApi::IsWritable(comp_ratio))
+                {
+                    comp_ratio->SetValue(parameters.image_compression_ratio_);
+                }
+                RCLCPP_INFO_STREAM(LOGGER_BASE, "Image compression enabled: " << parameters.image_compression_mode_
+                        << ", ratio " << parameters.image_compression_ratio_ << "%");
+            }
+            catch (const GenICam::GenericException& e)
+            {
+                RCLCPP_ERROR_STREAM(LOGGER_BASE, "Failed to enable image compression: " << e.GetDescription());
+            }
+        }
+
         grab_strategy_ = parameters.grab_strategy_;
         //cam_->StartGrabbing();
         grabbingStarting();
@@ -426,6 +456,43 @@ bool PylonROS2CameraImpl<CameraTraitT>::startGrabbing(const PylonROS2CameraParam
     return true;
 }
 
+template <typename CameraTrait>
+bool PylonROS2CameraImpl<CameraTrait>::decompressGrabResult(const Pylon::CBaslerUniversalGrabResultPtr& grab_result,
+                                                            uint8_t* dest, size_t dest_size)
+{
+    try
+    {
+        if (!image_decompressor_)
+        {
+            image_decompressor_ = std::make_unique<Pylon::CImageDecompressor>(cam_->GetNodeMap());
+        }
+        size_t out_size = dest_size;
+        image_decompressor_->DecompressImage(dest, &out_size, grab_result->GetBuffer(),
+                                             grab_result->GetPayloadSize());
+        return true;
+    }
+    catch (const GenICam::GenericException& e)
+    {
+        RCLCPP_ERROR_STREAM(LOGGER_BASE, "Failed to decompress image: " << e.GetDescription());
+        return false;
+    }
+}
+
+// Raw pixel pointer for a grab result: the grab buffer itself, or @p scratch
+// after decompression when the camera streams with Basler Compression Beyond.
+template <typename CameraTrait>
+const uint8_t* PylonROS2CameraImpl<CameraTrait>::rawImageData(const Pylon::CBaslerUniversalGrabResultPtr& grab_result,
+                                                              std::vector<uint8_t>& scratch)
+{
+    Pylon::CompressionInfo_t info;
+    if (!Pylon::CImageDecompressor::GetCompressionInfo(info, grab_result) || !info.hasCompressedImage)
+    {
+        return reinterpret_cast<uint8_t*>(grab_result->GetBuffer());
+    }
+    scratch.resize(info.decompressedImageSize);
+    return decompressGrabResult(grab_result, scratch.data(), scratch.size()) ? scratch.data() : nullptr;
+}
+
 // Grab a picture as std::vector of 8bits objects
 template <typename CameraTrait>
 bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image, rclcpp::Time &stamp)
@@ -447,8 +514,18 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image, rclcpp:
         RCLCPP_ERROR(LOGGER_BASE, "Error: Grab was not successful");
         return false;
     }
-    
-    const uint8_t *pImageBuffer = reinterpret_cast<uint8_t*>(ptr_grab_result->GetBuffer());
+
+    Pylon::CompressionInfo_t comp_info;
+    const bool compressed = Pylon::CImageDecompressor::GetCompressionInfo(comp_info, ptr_grab_result)
+                            && comp_info.hasCompressedImage;
+    if (compressed && comp_info.compressionStatus != Pylon::CompressionStatus_Ok)
+    {
+        // Camera could not compress this frame to the configured ratio; the
+        // image data was discarded on-camera. Skip the frame.
+        RCLCPP_WARN_THROTTLE(LOGGER_BASE, *rclcpp::Clock::make_shared(), 5000,
+            "Frame dropped: on-camera compression failed (raise image_compression_ratio)");
+        return false;
+    }
 
     // ------------------------------------------------------------------------
     // Bit shifting
@@ -456,16 +533,31 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(std::vector<uint8_t>& image, rclcpp:
     // In case of 12 bits we need to shift the image bits 4 positions to the left
     if (this->bit_shift_active_)
     {
+        const uint8_t *pImageBuffer = rawImageData(ptr_grab_result, decompress_scratch_);
+        if (pImageBuffer == nullptr)
+        {
+            return false;
+        }
         std::vector<uint16_t> shift_array(img_size_byte_ / 2); // Dynamically allocated to avoid heap size error
-        const uint16_t *convert_bits = reinterpret_cast<uint16_t*>(ptr_grab_result->GetBuffer());
+        const uint16_t *convert_bits = reinterpret_cast<const uint16_t*>(pImageBuffer);
         for (size_t i = 0; i < img_size_byte_ / 2; i++)
         {
             shift_array[i] = convert_bits[i] << 4;
         }
         image.assign(reinterpret_cast<uint8_t *>(shift_array.data()), reinterpret_cast<uint8_t *>(shift_array.data()) + img_size_byte_);
     } 
+    else if (compressed)
+    {
+        // Decompress straight into the output buffer - no intermediate copy.
+        image.resize(img_size_byte_);
+        if (!decompressGrabResult(ptr_grab_result, image.data(), image.size()))
+        {
+            return false;
+        }
+    }
     else 
     {
+        const uint8_t *pImageBuffer = reinterpret_cast<uint8_t*>(ptr_grab_result->GetBuffer());
         image.assign(pImageBuffer, pImageBuffer + img_size_byte_);
     }
 
@@ -521,6 +613,14 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(uint8_t* image)
         return false;
     }
 
+    Pylon::CompressionInfo_t comp_info;
+    const bool compressed = Pylon::CImageDecompressor::GetCompressionInfo(comp_info, ptr_grab_result)
+                            && comp_info.hasCompressedImage;
+    if (compressed && comp_info.compressionStatus != Pylon::CompressionStatus_Ok)
+    {
+        return false;
+    }
+
     // ------------------------------------------------------------------------
     // Bit shifting
     // ------------------------------------------------------------------------
@@ -529,13 +629,25 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(uint8_t* image)
 
     if (encodingconversions::is_12_bit_ros_enc(ros_enc))
     {
+        const uint8_t *pImageBuffer = rawImageData(ptr_grab_result, decompress_scratch_);
+        if (pImageBuffer == nullptr)
+        {
+            return false;
+        }
         std::vector<uint16_t> shift_array(img_size_byte_ / 2);
-        const uint16_t *convert_bits = reinterpret_cast<uint16_t*>(ptr_grab_result->GetBuffer());
+        const uint16_t *convert_bits = reinterpret_cast<const uint16_t*>(pImageBuffer);
         for (size_t i = 0; i < img_size_byte_ / 2; i++)
         {
             shift_array[i] = convert_bits[i] << 4;
         }
         memcpy(image, shift_array.data(), 2 * shift_array.size());
+    }
+    else if (compressed)
+    {
+        if (!decompressGrabResult(ptr_grab_result, image, img_size_byte_))
+        {
+            return false;
+        }
     }
     else
     {
@@ -568,10 +680,15 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(Pylon::CBaslerUniversalGrabResultPtr
 
     try
     {
+        // Reading TriggerMode is a ~2.5 ms GigE control round trip; cache it.
+        if (trigger_mode_cache_ == -99)
+        {
+            trigger_mode_cache_ = (cam_->TriggerMode.GetValue() == TriggerModeEnums::TriggerMode_On) ? 1 : 0;
+        }
         // WaitForFrameTriggerReady to prevent trigger signal to get lost
         // this could happen, if 2xExecuteSoftwareTrigger() is only followed by 1xgrabResult()
         // -> 2nd trigger might get lost
-        if ((cam_->TriggerMode.GetValue() == TriggerModeEnums::TriggerMode_On))
+        if (trigger_mode_cache_ == 1)
         {
             if (!cam_->CanWaitForFrameTriggerReady())
             {
@@ -2072,6 +2189,7 @@ std::string PylonROS2CameraImpl<CameraTraitT>::setTriggerMode(const bool& value)
             {
                 cam_->TriggerMode.SetValue(TriggerModeEnums::TriggerMode_Off);
             }
+            trigger_mode_cache_ = -99;
         }
         else
         {
@@ -3086,6 +3204,7 @@ std::string PylonROS2CameraImpl<CameraTraitT>::loadUserSet()
     {
         grabbingStopping();
         cam_->UserSetLoad.Execute();
+        trigger_mode_cache_ = -99;
         grabbingStarting();
     }
     catch ( const GenICam::GenericException &e )
@@ -3307,6 +3426,7 @@ std::string PylonROS2CameraImpl<CameraTraitT>::grabbingStarting() const
         {
             cam_->StartGrabbing(Pylon::EGrabStrategy::GrabStrategy_LatestImageOnly);
             RCLCPP_DEBUG(LOGGER_BASE, "Grabbing started (GrabStrategy_LatestImageOnly)");
+            trigger_mode_cache_ = -99;
             return "done";
         }
 
@@ -3314,11 +3434,13 @@ std::string PylonROS2CameraImpl<CameraTraitT>::grabbingStarting() const
         {
             cam_->StartGrabbing(Pylon::EGrabStrategy::GrabStrategy_LatestImages);
             RCLCPP_DEBUG(LOGGER_BASE, "Grabbing started (GrabStrategy_LatestImages)");
+            trigger_mode_cache_ = -99;
             return "done";
         }
 
         cam_->StartGrabbing(Pylon::EGrabStrategy::GrabStrategy_OneByOne);
         RCLCPP_DEBUG(LOGGER_BASE, "Grabbing started (GrabStrategy_OneByOne)");
+        trigger_mode_cache_ = -99;
 
         return "done";
     }

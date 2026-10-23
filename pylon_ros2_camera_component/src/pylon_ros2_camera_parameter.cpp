@@ -61,6 +61,9 @@ PylonROS2CameraParameter::PylonROS2CameraParameter() :
     enable_status_publisher_(false),
     enable_current_params_publisher_(false),
     startup_user_set_(""),
+    image_compression_mode_("Off"),
+    image_compression_rate_option_(""),
+    image_compression_ratio_(85.0),
     stereo_ace_illumination_mode_("AlwaysActive"),
     inter_pkg_delay_(0),
     frame_transmission_delay_(0),
@@ -385,6 +388,36 @@ void PylonROS2CameraParameter::readFromRosParameterServer(rclcpp::Node& nh)
     }
     
     nh.get_parameter("startup_user_set", this->startup_user_set_);
+
+    // image_compression_mode
+    RCLCPP_DEBUG(LOGGER, "---> image_compression_mode");
+
+    if (!nh.has_parameter("image_compression_mode"))
+    {
+        nh.declare_parameter<std::string>("image_compression_mode", "Off");
+    }
+
+    nh.get_parameter("image_compression_mode", this->image_compression_mode_);
+
+    // image_compression_rate_option
+    RCLCPP_DEBUG(LOGGER, "---> image_compression_rate_option");
+
+    if (!nh.has_parameter("image_compression_rate_option"))
+    {
+        nh.declare_parameter<std::string>("image_compression_rate_option", "");
+    }
+
+    nh.get_parameter("image_compression_rate_option", this->image_compression_rate_option_);
+
+    // image_compression_ratio
+    RCLCPP_DEBUG(LOGGER, "---> image_compression_ratio");
+
+    if (!nh.has_parameter("image_compression_ratio"))
+    {
+        nh.declare_parameter<double>("image_compression_ratio", 85.0);
+    }
+
+    nh.get_parameter("image_compression_ratio", this->image_compression_ratio_);
 
     // stereo_ace_illumination_mode
     RCLCPP_DEBUG(LOGGER, "---> stereo_ace_illumination_mode");
