@@ -346,7 +346,7 @@ public:
 
     /**
      * Publish ~/image_rect (and serve ~/grab_images_rect) when calibrated.
-     * camera_info is published with image_raw either way.
+     * camera_info is published with image_raw either way. Read at start-up.
      */
     bool enable_rect_;
 
