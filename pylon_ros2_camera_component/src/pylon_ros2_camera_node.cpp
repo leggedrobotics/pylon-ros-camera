@@ -972,7 +972,10 @@ bool PylonROS2CameraNode::startGrabbing()
       // override initial camera info if the url is valid
       if (this->camera_info_manager_->loadCameraInfo(this->pylon_camera_parameter_set_.cameraInfoURL()))
       {
-        this->setupRectification();
+        if (this->pylon_camera_parameter_set_.enable_rect_)
+        {
+          this->setupRectification();
+        }
         // Set the correct tf frame_id. A calibration of the acquired image size
         // is already in its pixel coordinates, so its ROI stays authoritative;
         // the hardware ROI only applies to a full-sensor calibration.
@@ -2611,7 +2614,7 @@ std::string PylonROS2CameraNode::gammaEnable(const int& enable)
 
 uint32_t PylonROS2CameraNode::getNumSubscribersRectImagePub() const
 {
-  return this->camera_info_manager_->isCalibrated() ? this->img_rect_pub_->getNumSubscribers() : 0;
+  return this->camera_info_manager_->isCalibrated() && this->img_rect_pub_ ? this->img_rect_pub_->getNumSubscribers() : 0;
 }
 
 void PylonROS2CameraNode::getMaxNumBufferCallback(const std::shared_ptr<GetIntegerSrv::Request> request,

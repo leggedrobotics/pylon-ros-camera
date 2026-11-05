@@ -345,6 +345,12 @@ public:
     int socket_buffer_size_;
 
     /**
+     * Publish ~/image_rect (and serve ~/grab_images_rect) when calibrated.
+     * camera_info is published with image_raw either way. Read at start-up.
+     */
+    bool enable_rect_;
+
+    /**
       Shutter mode
     */
     SHUTTER_MODE shutter_mode_;

@@ -73,6 +73,7 @@ PylonROS2CameraParameter::PylonROS2CameraParameter() :
     frame_transmission_delay_(0),
     frame_retention_(100),
     socket_buffer_size_(0),
+    enable_rect_(true),
     shutter_mode_(SM_DEFAULT),
     auto_flash_(false),
     auto_flash_line_2_(true),
@@ -514,6 +515,16 @@ void PylonROS2CameraParameter::readFromRosParameterServer(rclcpp::Node& nh)
     }
 
     nh.get_parameter("socket_buffer_size", this->socket_buffer_size_);
+
+    // enable_rect
+    RCLCPP_DEBUG(LOGGER, "---> enable_rect");
+
+    if (!nh.has_parameter("enable_rect"))
+    {
+        nh.declare_parameter<bool>("enable_rect", true);
+    }
+
+    nh.get_parameter("enable_rect", this->enable_rect_);
 
     // shutter mode
     RCLCPP_DEBUG(LOGGER, "---> shutter_mode");
