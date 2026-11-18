@@ -31,7 +31,7 @@
 
 #include <pylon_ros2_camera_component/pylon_ros2_camera_node.hpp>
 
-#include <opencv4/opencv2/highgui.hpp>
+#include <opencv2/highgui.hpp>
 
 
 namespace pylon_ros2_camera
