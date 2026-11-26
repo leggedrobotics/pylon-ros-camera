@@ -936,10 +936,12 @@ bool PylonROS2CameraImpl<CameraTrait>::grab(Pylon::CBaslerUniversalGrabResultPtr
 
     try
     {
-        // Reading TriggerMode is a ~2.5 ms GigE control round trip; cache it.
+        // 1 = software-triggered. A hardware source (line, action, periodic
+        // signal) triggers itself. Cached: each read is a ~2.5 ms round trip.
         if (trigger_mode_cache_ == -99)
         {
-            trigger_mode_cache_ = (cam_->TriggerMode.GetValue() == TriggerModeEnums::TriggerMode_On) ? 1 : 0;
+            trigger_mode_cache_ = (cam_->TriggerMode.GetValue() == TriggerModeEnums::TriggerMode_On &&
+                                   cam_->TriggerSource.GetValue() == TriggerSourceEnums::TriggerSource_Software) ? 1 : 0;
         }
         // WaitForFrameTriggerReady to prevent trigger signal to get lost
         // this could happen, if 2xExecuteSoftwareTrigger() is only followed by 1xgrabResult()
@@ -2583,6 +2585,8 @@ std::string PylonROS2CameraImpl<CameraTraitT>::setTriggerSource(const int& sourc
                     RCLCPP_ERROR_STREAM(LOGGER_BASE, "Trigger source value is invalid! Please choose between 0 -> Trigger Software / 1 -> Line 1 / 2 -> Line 2 / 3 -> Line 3 / 4 -> Line 4 / 5 -> Action 1 / 6 -> Periodic signal 1");
                     return "Error: unknown value for trigger source";
             }
+            // grab() software-triggers only for the Software source.
+            trigger_mode_cache_ = -99;
         }
         else
         {
